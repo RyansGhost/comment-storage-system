@@ -1,0 +1,81 @@
+name: Tests
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Test suite and container smoke test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Runs the FiveAM suite inside the Dockerfile's `test` stage: the same
+      # Debian SBCL and pinned Quicklisp dist as production. The build fails
+      # if any test fails. Dependency layers are cached between runs.
+      - name: Run test suite
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: test
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build runtime image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: runtime
+          load: true
+          tags: rf-comments:ci
+          cache-from: type=gha
+
+      - name: Smoke test the container
+        run: |
+          set -euo pipefail
+          mkdir -p data && sudo chown 10001:10001 data
+          docker run -d --name rf-comments -p 127.0.0.1:8080:8080 \
+            -v "$PWD/data:/data" \
+            -e PUBLIC_URL=http://127.0.0.1:8080 -e ADMIN_PASSWORD=ci \
+            rf-comments:ci
+
+          for i in $(seq 1 30); do
+            curl -fsS http://127.0.0.1:8080/healthz && break
+            sleep 1
+          done
+          echo
+          test "$(curl -fsS http://127.0.0.1:8080/healthz)" = ok
+          curl -fsS http://127.0.0.1:8080/embed.js | grep -q 'rf-comments:height'
+          curl -fsS http://127.0.0.1:8080/admin/login | grep -q 'Admin sign in'
+
+          # The database must live on the host, outside the container.
+          test -f data/comments.db
+
+          # Docker's own HEALTHCHECK (runs `rf-comments healthcheck`).
+          for i in $(seq 1 30); do
+            status=$(docker inspect --format '{{.State.Health.Status}}' rf-comments)
+            [ "$status" = healthy ] && break
+            sleep 2
+          done
+          echo "container health: $status"
+          test "$status" = healthy
+
+          # Graceful shutdown on SIGTERM.
+          docker stop -t 10 rf-comments
+
+      - name: Container logs
+        if: always()
+        run: docker logs rf-comments 2>&1 || true
