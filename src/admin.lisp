@@ -15,22 +15,19 @@
         (t (redirect-to "/admin/login"))))
 
 (defmacro admin-page ((title) &body body)
-  `(progn
-     (set-security-headers)
-     (setf (ht:header-out "Cache-Control") "no-store")
-     (html-page (:title (format nil "~a · admin" ,title))
-       (:main.page
-        (:nav (:span (:a :href "/admin" (:strong "Comments admin")) " · "
-                     (:a :href "/admin/sites/new" "New site"))
-              (:form.rf-inline :method "post" :action "/admin/logout"
-                               (:button.rf-secondary :type "submit" "Log out")))
-        ,@body))))
+  "Admin layout. Headers come from the DEFPAGE/DEFACTION route macros."
+  `(html-page (:title (format nil "~a · admin" ,title))
+     (:main.page
+      (:nav (:span (:a :href "/admin" (:strong "Comments admin")) " · "
+                   (:a :href "/admin/sites/new" "New site"))
+            (:form.rf-inline :method "post" :action "/admin/logout"
+                             (:button.rf-secondary :type "submit" "Log out")))
+      ,@body)))
 
 ;;; ------------------------------------------------------------------
 ;;; Login
 
 (defun admin-login-page (&optional error (status 200))
-  (set-security-headers)
   (respond
    (html-page (:title "Admin sign in")
      (:main.page.narrow
@@ -42,14 +39,13 @@
        (:div (:button :type "submit" "Sign in")))))
    :status status))
 
-(easy-routes:defroute admin-login ("/admin/login" :method :get) ()
+(defpage admin-login ("/admin/login") ()
   (cond ((null *admin-password*)
          (error-page 404 "Not found" "The admin interface is disabled (ADMIN_PASSWORD is not set)."))
         ((admin-session-p) (redirect-to "/admin"))
         (t (admin-login-page))))
 
-(easy-routes:defroute admin-login-post ("/admin/login" :method :post :decorators (@same-origin))
-    (&post password)
+(defaction admin-login-post ("/admin/login") (&post password)
   (cond ((null *admin-password*) (error-page 404 "Not found" "Admin is disabled."))
         ((rate-limited-p (list :admin-login (client-ip)) 5 60)
          (admin-login-page "Too many attempts; wait a minute." 429))
@@ -59,8 +55,7 @@
          (redirect-to "/admin"))
         (t (admin-login-page "Wrong password." 401))))
 
-(easy-routes:defroute admin-logout ("/admin/logout" :method :post :decorators (@same-origin))
-    ()
+(defaction admin-logout ("/admin/logout") ()
   (delete-session (ht:cookie-in +admin-cookie+))
   (clear-cookie +admin-cookie+ :path "/admin" :same-site "Strict")
   (redirect-to "/admin/login"))
@@ -73,7 +68,7 @@
     (:form :method "post" :action (format nil "/admin/comments/~d/~a" id action)
            (:button :type "submit" :class class label))))
 
-(easy-routes:defroute admin-home ("/admin" :method :get :decorators (@admin)) (&get status)
+(defpage admin-home ("/admin" :decorators (@admin @no-cache)) (&get status)
   (let* ((status (and (member status '("pending" "published" "hidden") :test #'equal) status))
          (sites (list-sites))
          (comments (recent-comments :status status :limit 200)))
@@ -123,8 +118,7 @@
                        (status-button (getf c :id) "hide" "Hide" "rf-secondary"))
                      (status-button (getf c :id) "delete" "Delete" "rf-danger")))))))))))
 
-(easy-routes:defroute admin-comment-action ("/admin/comments/:id/:action" :method :post
-                                                                         :decorators (@admin @same-origin))
+(defaction admin-comment-action ("/admin/comments/:id/:action" :decorators (@admin))
     (&path (id 'integer))
   (cond ((string= action "publish") (set-comment-status id "published"))
         ((string= action "hide") (set-comment-status id "hidden"))
@@ -240,27 +234,24 @@
         (progn (apply #'update-site id args) id)
         (apply #'create-site args))))
 
-(easy-routes:defroute admin-site-new ("/admin/sites/new" :method :get :decorators (@admin)) ()
+(defpage admin-site-new ("/admin/sites/new" :decorators (@admin @no-cache)) ()
   (site-form-page))
 
-(easy-routes:defroute admin-site-create ("/admin/sites" :method :post
-                                                        :decorators (@admin @same-origin))
-    ()
+(defaction admin-site-create ("/admin/sites" :decorators (@admin)) ()
   (let* ((v (site-form-values))
          (error (validate-site-values v)))
     (if error
         (site-form-page :values v :error error :status 422)
         (redirect-to (format nil "/admin/sites/~d" (save-site v))))))
 
-(easy-routes:defroute admin-site-edit ("/admin/sites/:id" :method :get :decorators (@admin))
+(defpage admin-site-edit ("/admin/sites/:id" :decorators (@admin @no-cache))
     (&path (id 'integer))
   (let ((site (site-by-id id)))
     (if site
         (site-form-page :site site)
         (error-page 404 "Not found" "No such site."))))
 
-(easy-routes:defroute admin-site-update ("/admin/sites/:id" :method :post
-                                                            :decorators (@admin @same-origin))
+(defaction admin-site-update ("/admin/sites/:id" :decorators (@admin))
     (&path (id 'integer))
   (let ((site (site-by-id id)))
     (if (null site)
@@ -272,8 +263,7 @@
               (progn (save-site v id)
                      (redirect-to (format nil "/admin/sites/~d" id))))))))
 
-(easy-routes:defroute admin-site-delete ("/admin/sites/:id/delete" :method :post
-                                                                   :decorators (@admin @same-origin))
+(defaction admin-site-delete ("/admin/sites/:id/delete" :decorators (@admin))
     (&path (id 'integer))
   (delete-site id)
   (redirect-to "/admin"))

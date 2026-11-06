@@ -24,62 +24,6 @@
 
 (reload-static)
 
-;;; ------------------------------------------------------------------
-;;; Request helpers
-
-(defun client-ip ()
-  (or (when *trust-proxy*
-        (let ((xff (ht:header-in* :x-forwarded-for)))
-          (when xff
-            (trim (car (last (cl-ppcre:split "," xff)))))))
-      (ht:remote-addr*)))
-
-(defun absolute-url (path-or-url)
-  (if (local-path-p path-or-url)
-      (concatenate 'string *public-url* path-or-url)
-      path-or-url))
-
-(defun redirect-to (path-or-url)
-  "303 See Other, always to an absolute URL (correct behind a TLS proxy)."
-  (ht:redirect (absolute-url path-or-url) :code ht:+http-see-other+))
-
-(defun set-security-headers (&key (frame-ancestors "'none'") (referrer "same-origin")
-                                (form-action "'self'"))
-  (setf (ht:header-out "X-Content-Type-Options") "nosniff"
-        (ht:header-out "Referrer-Policy") referrer
-        (ht:header-out "Content-Security-Policy")
-        (format nil "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; ~
-                     script-src 'self'; form-action ~a; base-uri 'none'; frame-ancestors ~a"
-                form-action frame-ancestors)))
-
-(defun respond (html &key (status 200))
-  (setf (ht:return-code*) status
-        (ht:content-type*) "text/html; charset=utf-8")
-  html)
-
-(defun error-page (status title message)
-  (set-security-headers)
-  (respond (simple-page title message :kind "error") :status status))
-
-(defun origin-ok-p ()
-  "True if the request's Origin (or, failing that, Referer) is our own."
-  (let* ((ours (url-origin *public-url*))
-         (origin (ht:header-in* :origin))
-         (referer (ht:header-in* :referer)))
-    (cond ((and origin (string/= origin "null")) (equal (url-origin origin) ours))
-          (referer (equal (url-origin referer) ours))
-          (t nil))))
-
-(defun @same-origin (next)
-  "Decorator: reject state-changing requests that don't come from our pages."
-  (if (origin-ok-p)
-      (funcall next)
-      (error-page 403 "Forbidden" "This form must be submitted from comments pages.")))
-
-(defun @no-cache (next)
-  (setf (ht:header-out "Cache-Control") "no-store")
-  (funcall next))
-
 ;;; Cookies
 
 (defun set-cookie (name value &key (max-age *session-ttl*) (path "/") (same-site "Lax"))
@@ -185,13 +129,13 @@
            (values nil "Comments are not enabled for this domain."))
           (t (values site page-url)))))
 
-(easy-routes:defroute thread ("/thread" :method :get) (&get site page title notice)
+(defpage thread ("/thread") (&get site page title notice)
   (multiple-value-bind (site page-url) (resolve-thread site page)
     (if site
         (render-thread site page-url (clean-title title) :user (current-user) :notice notice)
         (unavailable-thread page-url))))
 
-(easy-routes:defroute post-comment ("/thread/comment" :method :post :decorators (@same-origin))
+(defaction post-comment ("/thread/comment")
     (&post site page title name email body website)
   (multiple-value-bind (site page-url) (resolve-thread site page)
     (unless site
@@ -201,43 +145,40 @@
            (form (list :name name :email email :body body)))
       (flet ((fail (message &optional (status 422))
                (render-thread site page-url title :user user :error message :form form
-                                                  :status status)))
+                                                  :status status))
+             (back-to-thread (&rest args)
+               (redirect-to (apply #'thread-path (getf site :key) page-url title args))))
         ;; Bots fill in every field; humans never see this one.
         (unless (blank-p website)
-          (return-from post-comment
-            (redirect-to (thread-path (getf site :key) page-url title :notice "check-email"))))
+          (return-from post-comment (back-to-thread :notice "check-email")))
         (when (rate-limited-p (list :comment (client-ip)) *comments-per-window* *rate-window*)
           (return-from post-comment
             (fail "You're commenting too quickly. Please wait a few minutes." 429)))
-        (multiple-value-bind (clean-body err) (clean-body body)
-          (unless clean-body (return-from post-comment (fail err)))
-          (if user
-              ;; Signed in: the email is already proven, publish immediately.
+        (if user
+            ;; Signed in: the email is already proven, publish immediately.
+            (with-valid-inputs ((clean-body clean-body body))
+                (:on-error (message) (fail message))
               (let ((id (create-comment :site-id (getf site :id) :user-id (getf user :id)
                                         :page-url page-url :page-title title :body clean-body
                                         :status "published" :ip-hash (hash-ip (client-ip)))))
-                (redirect-to (thread-path (getf site :key) page-url title
-                                          :notice "posted" :anchor (format nil "c~d" id))))
-              (multiple-value-bind (clean-name err) (clean-display-name name)
-                (unless clean-name (return-from post-comment (fail err)))
-                (multiple-value-bind (clean-email err) (normalize-email email)
-                  (unless clean-email (return-from post-comment (fail err)))
-                  (let* ((user (find-or-create-user clean-email clean-name))
-                         (id (create-comment :site-id (getf site :id) :user-id (getf user :id)
-                                             :page-url page-url :page-title title
-                                             :body clean-body :status "pending"
-                                             :ip-hash (hash-ip (client-ip))))
-                         (notice
-                           (cond ((>= (recent-email-count (getf user :id)) *emails-per-hour*)
-                                  "email-limit")
-                                 ((send-verification-email
-                                   user id
-                                   (issue-token (getf user :id) "verify" :comment-id id)
-                                   page-url)
-                                  "check-email")
-                                 (t "email-failed"))))
-                    (redirect-to (thread-path (getf site :key) page-url title
-                                              :notice notice)))))))))))
+                (back-to-thread :notice "posted" :anchor (format nil "c~d" id))))
+            (with-valid-inputs ((clean-body clean-body body)
+                                (clean-name clean-display-name name)
+                                (clean-email normalize-email email))
+                (:on-error (message) (fail message))
+              (let* ((user (find-or-create-user clean-email clean-name))
+                     (id (create-comment :site-id (getf site :id) :user-id (getf user :id)
+                                         :page-url page-url :page-title title
+                                         :body clean-body :status "pending"
+                                         :ip-hash (hash-ip (client-ip)))))
+                (back-to-thread
+                 :notice (cond ((>= (recent-email-count (getf user :id)) *emails-per-hour*)
+                                "email-limit")
+                               ((send-verification-email
+                                 user id (issue-token (getf user :id) "verify" :comment-id id)
+                                 page-url)
+                                "check-email")
+                               (t "email-failed"))))))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Email confirmation. GET shows a button; POST does the work, so that
@@ -264,7 +205,7 @@
   (error-page 410 "Link expired"
               "This link has expired or has already been used. You can request a new sign-in link from the sign-in page."))
 
-(easy-routes:defroute verify ("/verify" :method :get :decorators (@no-cache)) (&get token)
+(defpage verify ("/verify" :decorators (@no-cache)) (&get token)
   (let ((tok (peek-token token "verify")))
     (if tok
         (let ((comment (comment-by-id (getf tok :comment-id))))
@@ -276,9 +217,7 @@
                         :redirect-origin (url-origin (getf comment :page-url))))
         (expired-link))))
 
-(easy-routes:defroute verify-post ("/verify" :method :post
-                                             :decorators (@same-origin @no-cache))
-    (&post token)
+(defaction verify-post ("/verify") (&post token)
   (let ((tok (consume-token token "verify")))
     (if (null tok)
         (expired-link)
@@ -295,7 +234,6 @@
 ;;; Magic-link login
 
 (defun login-page (&key notice error (status 200) email)
-  (set-security-headers)
   (respond
    (html-page (:title "Sign in")
      (:main.page.narrow
@@ -309,35 +247,31 @@
        (:div (:button :type "submit" "Email me a link")))))
    :status status))
 
-(easy-routes:defroute login ("/login" :method :get) (&get notice)
+(defpage login ("/login") (&get notice)
   (if (current-user)
       (redirect-to "/me")
       (login-page :notice (notice-text notice))))
 
-(easy-routes:defroute login-post ("/login" :method :post :decorators (@same-origin)) (&post email)
+(defaction login-post ("/login") (&post email)
   (when (rate-limited-p (list :login (client-ip)) 10 *rate-window*)
     (return-from login-post
       (login-page :error "Too many attempts. Please wait a few minutes." :status 429)))
-  (multiple-value-bind (clean err) (normalize-email email)
-    (if (null clean)
-        (login-page :error err :email email :status 422)
-        (let ((user (user-by-email clean)))
-          ;; Same answer whether or not the account exists.
-          (when (and user (< (recent-email-count (getf user :id)) *emails-per-hour*))
-            (send-login-email user (issue-token (getf user :id) "login")))
-          (set-security-headers)
-          (respond (simple-page "Check your inbox"
-                                (format nil "If ~a has commented here, a sign-in link is on its way." clean)))))))
+  (with-valid-inputs ((clean normalize-email email))
+      (:on-error (message) (login-page :error message :email email :status 422))
+    (let ((user (user-by-email clean)))
+      ;; Same answer whether or not the account exists.
+      (when (and user (< (recent-email-count (getf user :id)) *emails-per-hour*))
+        (send-login-email user (issue-token (getf user :id) "login")))
+      (respond (simple-page "Check your inbox"
+                            (format nil "If ~a has commented here, a sign-in link is on its way."
+                                    clean))))))
 
-(easy-routes:defroute login-callback ("/login/callback" :method :get :decorators (@no-cache))
-    (&get token)
+(defpage login-callback ("/login/callback" :decorators (@no-cache)) (&get token)
   (if (peek-token token "login")
       (confirm-page "Sign in" "Continue to your profile?" "/login/callback" token "Sign in")
       (expired-link)))
 
-(easy-routes:defroute login-callback-post ("/login/callback" :method :post
-                                                             :decorators (@same-origin @no-cache))
-    (&post token)
+(defaction login-callback-post ("/login/callback") (&post token)
   (let ((tok (consume-token token "login")))
     (if (null tok)
         (expired-link)
@@ -345,7 +279,7 @@
                (sign-in (getf tok :user-id))
                (redirect-to "/me")))))
 
-(easy-routes:defroute logout ("/logout" :method :post :decorators (@same-origin)) (&post return)
+(defaction logout ("/logout") (&post return)
   (delete-session (ht:cookie-in +user-cookie+))
   (clear-cookie +user-cookie+)
   (redirect-to (if (local-path-p return) return "/login?notice=signed-out")))
@@ -362,8 +296,7 @@
         (let ((*user* user)) (funcall next))
         (redirect-to "/login"))))
 
-(easy-routes:defroute me ("/me" :method :get :decorators (@user @no-cache)) (&get notice)
-  (set-security-headers)
+(defpage me ("/me" :decorators (@user @no-cache)) (&get notice)
   (let ((comments (user-comments (getf *user* :id))))
     (respond
      (html-page (:title "Your comments")
@@ -400,16 +333,13 @@
                              :action (format nil "/me/comments/~d/delete" (getf c :id))
                              (:button.rf-danger :type "submit" "Delete")))))))))))))
 
-(easy-routes:defroute me-name ("/me/name" :method :post :decorators (@same-origin @user))
-    (&post name)
-  (multiple-value-bind (clean err) (clean-display-name name)
-    (declare (ignore err))
-    (when clean (set-user-name (getf *user* :id) clean))
-    (redirect-to (if clean "/me?notice=name-saved" "/me"))))
+(defaction me-name ("/me/name" :decorators (@user)) (&post name)
+  (with-valid-inputs ((clean clean-display-name name))
+      (:on-error (message) (declare (ignore message)) (redirect-to "/me"))
+    (set-user-name (getf *user* :id) clean)
+    (redirect-to "/me?notice=name-saved")))
 
-(easy-routes:defroute me-delete ("/me/comments/:id/delete" :method :post
-                                                           :decorators (@same-origin @user))
-    (&path (id 'integer))
+(defaction me-delete ("/me/comments/:id/delete" :decorators (@user)) (&path (id 'integer))
   (let ((comment (comment-by-id id)))
     (when (and comment (eql (getf comment :user-id) (getf *user* :id)))
       (delete-comment id))
@@ -455,8 +385,7 @@
   (handler-case (progn (query-one "SELECT 1") "ok")
     (error () (setf (ht:return-code*) 503) "database unavailable")))
 
-(easy-routes:defroute home ("/" :method :get) ()
-  (set-security-headers)
+(defpage home ("/") ()
   (respond
    (html-page (:title "Comments")
      (:main.page.narrow

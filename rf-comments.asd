@@ -26,6 +26,7 @@
                              (:file "db")
                              (:file "email")
                              (:file "views")
+                             (:file "routes")
                              (:file "web")
                              (:file "admin")
                              (:file "main")))

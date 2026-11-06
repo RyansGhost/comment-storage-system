@@ -401,6 +401,7 @@ src/
   db.lisp              SQLite connection, migrations, data model queries
   email.lisp           SES v2 SendEmail + SigV4 signer + email templates
   views.lisp           Spinneret layout, CSS, per-site themes
+  routes.lisp          request helpers, decorators, defpage/defaction/with-valid-inputs
   web.lisp             public routes: /thread, /verify, /login, /me, /api, /embed.js
   admin.lisp           /admin: sites, themes, moderation
   main.lisp            start/stop, executable entry point, healthcheck

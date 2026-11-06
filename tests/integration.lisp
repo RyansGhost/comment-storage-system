@@ -320,3 +320,29 @@ Returns (values body status headers-hash-table)."
         (is (string= "api body" (gethash "body" (aref json 0))))
         (is (string= "Alice" (gethash "author" (aref json 0))))))
     (is (= 404 (nth-value 1 (req :get "/api/comments?site=nope&page=x"))))))
+
+;;; ------------------------------------------------------------------
+;;; Route DSL guarantees (src/routes.lisp)
+
+(test every-post-route-is-a-csrf-protected-action
+  ;; Introspect easy-routes' registry: no POST route may skip @SAME-ORIGIN,
+  ;; i.e. every POST handler must be declared with DEFACTION.
+  (let ((posts '()))
+    (maphash (lambda (name route)
+               (when (eq :post (easy-routes::required-method route))
+                 (push name posts)
+                 (is (eq 'rf-comments::@same-origin
+                         (first (easy-routes::route-decorators route)))
+                     "POST route ~a does not run @same-origin first" name)))
+             easy-routes::*routes*)
+    (is (= (length posts) (length rf-comments::*actions*)))
+    (is (>= (length posts) 13))))
+
+(test every-action-rejects-cross-site-posts
+  (with-test-server ()
+    (dolist (template rf-comments::*actions*)
+      (let ((path (cl-ppcre:regex-replace-all ":[a-z-]+" template "1")))
+        (is (= 403 (nth-value 1 (req :post path :origin nil)))
+            "~a accepted a POST without Origin" path)
+        (is (= 403 (nth-value 1 (req :post path :origin "https://evil.example.com")))
+            "~a accepted a cross-site POST" path)))))

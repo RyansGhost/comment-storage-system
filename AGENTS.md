@@ -44,6 +44,17 @@ Never commit untested work directly to `master`.
   `tests/unit.lisp`, end-to-end HTTP tests in `tests/integration.lisp`.
 - Schema changes go in a *new* entry at the end of `*migrations*` in
   `src/db.lisp`. Never edit an applied migration.
-- Generate HTML only through Spinneret, so output stays escaped. Every
-  state-changing route is a POST with the `@same-origin` decorator.
+- Generate HTML only through Spinneret, so output stays escaped.
+
+## Writing routes
+
+Declare routes with the macros in `src/routes.lisp`:
+
+- `defpage` for HTML GET routes. It adds the default security headers.
+- `defaction` for every POST. It always runs the same-origin (CSRF) check
+  first and disables caching. **Never use a raw `easy-routes:defroute` for a
+  POST.** The test suite fails if any POST route skips `@same-origin`.
+- `with-valid-inputs` to clean and validate form fields instead of nesting
+  `multiple-value-bind` checks.
+- Plain `easy-routes:defroute` only for non-HTML GETs (scripts, JSON, health).
 - Secrets come from the environment (`.env`, never committed).

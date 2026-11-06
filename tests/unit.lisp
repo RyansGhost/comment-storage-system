@@ -140,3 +140,22 @@ https://b.example.com/, https://a.example.com  not-a-url")
       (rf-comments::migrate)
       (rf-comments::migrate))
     (is (= 1 (length (rf-comments:query "SELECT * FROM schema_migrations"))))))
+
+(defun fake-cleaner (x)
+  (if (string= x "bad") (values nil (format nil "~a is invalid" x)) (string-upcase x)))
+
+(test with-valid-inputs-macro
+  (is (equal '("A" "B")
+             (rf-comments::with-valid-inputs ((a fake-cleaner "a") (b fake-cleaner "b"))
+                 (:on-error (e) (list :error e))
+               (list a b))))
+  ;; Stops at the first invalid input and returns the handler's value.
+  (let ((evaluated '()))
+    (is (equal '(:error "bad is invalid")
+               (rf-comments::with-valid-inputs
+                   ((a fake-cleaner (progn (push 1 evaluated) "a"))
+                    (b fake-cleaner (progn (push 2 evaluated) "bad"))
+                    (c fake-cleaner (progn (push 3 evaluated) "c")))
+                   (:on-error (e) (list :error e))
+                 (list a b c))))
+    (is (equal '(2 1) evaluated))))

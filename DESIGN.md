@@ -189,3 +189,17 @@ schema_migrations (version PK, applied_at)
 6. README with install, embed snippet, deployment (Caddy/nginx), SES setup
    (domain verification, sandbox, IAM policy), backups, and Emacs setup (SLY,
    Quicklisp, paredit, corfu, workflow).
+
+## 6. Enhancements after reading *Lisp for the Web*
+
+Each enhancement shipped on its own branch.
+
+### Route macros (book ch. 2: macros against duplication)
+
+`src/routes.lisp` defines `defpage` (HTML GET plus default security headers)
+and `defaction` (POST). `defaction` always runs `@same-origin`, then
+`@no-cache`, then any route-specific decorators, so CSRF protection is part
+of the route's definition, not something each handler must remember. A test
+checks easy-routes' registry so that no POST route can skip it.
+`with-valid-inputs` flattens validation chains.
+
