@@ -12,6 +12,8 @@ Used to build links in emails and to verify the Origin of POST requests.")
 (defvar *address* nil "Interface to bind; NIL means all interfaces.")
 (defvar *db-path* "data/comments.db")
 (defvar *admin-password* nil "Admin password. NIL disables /admin.")
+(defvar *admin-email* nil
+  "Where to send \"new comment\" notifications. NIL disables them.")
 (defvar *email-backend* :log
   "One of :SES (send through Amazon SES), :LOG (print to stdout) or
 :CAPTURE (push onto *CAPTURED-EMAILS*; used by the tests).")
@@ -55,6 +57,7 @@ Used to build links in emails and to verify the Origin of POST requests.")
         *address* (env "BIND_ADDRESS" *address*)
         *db-path* (env "DB_PATH" *db-path*)
         *admin-password* (env "ADMIN_PASSWORD" *admin-password*)
+        *admin-email* (env "ADMIN_EMAIL" *admin-email*)
         *email-backend* (intern (string-upcase (env "EMAIL_BACKEND" (string *email-backend*)))
                                 :keyword)
         *ses-from* (env "SES_FROM" *ses-from*)

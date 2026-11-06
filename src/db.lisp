@@ -99,7 +99,17 @@
         kind       TEXT NOT NULL CHECK (kind IN ('user','admin')),
         user_id    INTEGER REFERENCES users(id) ON DELETE CASCADE,
         created_at TEXT NOT NULL,
-        expires_at TEXT NOT NULL)")))
+        expires_at TEXT NOT NULL)")
+    (2
+     ;; Audit trail written by the observers in events.lisp. No foreign key:
+     ;; entries outlive the comments they describe.
+     "CREATE TABLE moderation_log (
+        id         INTEGER PRIMARY KEY,
+        comment_id INTEGER,
+        action     TEXT NOT NULL,
+        actor      TEXT NOT NULL,
+        summary    TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL)")))
 
 (defun migrate ()
   (exec "CREATE TABLE IF NOT EXISTS schema_migrations (

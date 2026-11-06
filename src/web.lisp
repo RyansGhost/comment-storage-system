@@ -160,7 +160,8 @@
                 (:on-error (message) (fail message))
               (let ((id (create-comment :site-id (getf site :id) :user-id (getf user :id)
                                         :page-url page-url :page-title title :body clean-body
-                                        :status "published" :ip-hash (hash-ip (client-ip)))))
+                                        :status "pending" :ip-hash (hash-ip (client-ip)))))
+                (publish-comment (comment-by-id id) :author)
                 (back-to-thread :notice "posted" :anchor (format nil "c~d" id))))
             (with-valid-inputs ((clean-body clean-body body)
                                 (clean-name clean-display-name name)
@@ -225,7 +226,7 @@
           (mark-user-verified (getf tok :user-id))
           (sign-in (getf tok :user-id))
           (when (and comment (string= (getf comment :status) "pending"))
-            (set-comment-status (getf comment :id) "published"))
+            (publish-comment comment :author))
           (redirect-to (if comment
                            (format nil "~a#rf-comments" (getf comment :page-url))
                            "/me"))))))
@@ -342,7 +343,7 @@
 (defaction me-delete ("/me/comments/:id/delete" :decorators (@user)) (&path (id 'integer))
   (let ((comment (comment-by-id id)))
     (when (and comment (eql (getf comment :user-id) (getf *user* :id)))
-      (delete-comment id))
+      (remove-comment comment :author))
     (redirect-to "/me?notice=deleted")))
 
 ;;; ------------------------------------------------------------------
