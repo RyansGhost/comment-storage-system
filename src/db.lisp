@@ -109,7 +109,27 @@
         action     TEXT NOT NULL,
         actor      TEXT NOT NULL,
         summary    TEXT NOT NULL DEFAULT '',
-        created_at TEXT NOT NULL)")))
+        created_at TEXT NOT NULL)")
+    (3
+     ;; Stable thread identity ("On natural IDs"): a thread is keyed by the
+     ;; embed's data-page-id, or by its canonical URL when there is none.
+     ;; comments.page_url keeps the URL the comment was posted from.
+     "CREATE TABLE threads (
+        id         INTEGER PRIMARY KEY,
+        site_id    INTEGER NOT NULL REFERENCES sites(id) ON DELETE CASCADE,
+        page_key   TEXT NOT NULL,
+        url        TEXT NOT NULL,
+        title      TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL,
+        UNIQUE (site_id, page_key))"
+     "INSERT INTO threads (site_id, page_key, url, title, created_at)
+        SELECT site_id, page_url, page_url, max(page_title), min(created_at)
+        FROM comments GROUP BY site_id, page_url"
+     "ALTER TABLE comments ADD COLUMN thread_id INTEGER REFERENCES threads(id) ON DELETE CASCADE"
+     "UPDATE comments SET thread_id =
+        (SELECT t.id FROM threads t
+         WHERE t.site_id = comments.site_id AND t.page_key = comments.page_url)"
+     "CREATE INDEX comments_thread ON comments(thread_id, status, created_at)")))
 
 (defun migrate ()
   (exec "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -260,40 +280,49 @@ an already verified user is never changed by an anonymous submission."
 ;;; ------------------------------------------------------------------
 ;;; Comments
 
-(defun create-comment (&key site-id user-id page-url (page-title "") body
+(defun create-comment (&key site-id thread-id user-id page-url (page-title "") body
                          (status "pending") ip-hash)
   (let ((now (iso-time)))
     (values
-     (exec "INSERT INTO comments (site_id, user_id, page_url, page_title, body, status,
-                                  ip_hash, created_at, published_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
-           site-id user-id page-url page-title body status ip-hash now
+     (exec "INSERT INTO comments (site_id, thread_id, user_id, page_url, page_title, body,
+                                  status, ip_hash, created_at, published_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+           site-id thread-id user-id page-url page-title body status ip-hash now
            (when (string= status "published") now)))))
 
-(defun comment-by-id (id)
-  (query-one "SELECT c.*, u.display_name, u.email, s.key AS site_key
-              FROM comments c JOIN users u ON u.id = c.user_id
-              JOIN sites s ON s.id = c.site_id WHERE c.id = ?" id))
+;;; LINK_URL is where a comment lives now: its thread's current URL, which
+;;; can differ from PAGE_URL (where it was posted) after a page moves.
 
-(defun page-comments (site-id page-url &key viewer-id)
-  "Published comments for a page, plus the viewer's own pending ones."
+(defun comment-by-id (id)
+  (query-one "SELECT c.*, u.display_name, u.email, s.key AS site_key,
+                     coalesce(t.url, c.page_url) AS link_url
+              FROM comments c JOIN users u ON u.id = c.user_id
+              JOIN sites s ON s.id = c.site_id
+              LEFT JOIN threads t ON t.id = c.thread_id WHERE c.id = ?" id))
+
+(defun page-comments (thread-id &key viewer-id)
+  "Published comments in a thread, plus the viewer's own pending ones."
   (query "SELECT c.id, c.body, c.status, c.created_at, c.user_id, u.display_name
           FROM comments c JOIN users u ON u.id = c.user_id
-          WHERE c.site_id = ? AND c.page_url = ?
+          WHERE c.thread_id = ?
             AND (c.status = 'published' OR (c.status = 'pending' AND c.user_id = ?))
           ORDER BY c.created_at, c.id"
-         site-id page-url (or viewer-id -1)))
+         (or thread-id -1) (or viewer-id -1)))
 
 (defun user-comments (user-id)
-  (query "SELECT c.*, s.key AS site_key, s.name AS site_name
+  (query "SELECT c.*, s.key AS site_key, s.name AS site_name,
+                 coalesce(t.url, c.page_url) AS link_url
           FROM comments c JOIN sites s ON s.id = c.site_id
+          LEFT JOIN threads t ON t.id = c.thread_id
           WHERE c.user_id = ? ORDER BY c.created_at DESC, c.id DESC" user-id))
 
 (defun recent-comments (&key status (limit 100))
   (apply #'query
-         (format nil "SELECT c.*, u.display_name, u.email, u.verified_at, s.key AS site_key
+         (format nil "SELECT c.*, u.display_name, u.email, u.verified_at, s.key AS site_key,
+                             coalesce(t.url, c.page_url) AS link_url
                       FROM comments c JOIN users u ON u.id = c.user_id
                       JOIN sites s ON s.id = c.site_id
+                      LEFT JOIN threads t ON t.id = c.thread_id
                       ~:[~;WHERE c.status = ?~]
                       ORDER BY c.created_at DESC, c.id DESC LIMIT ~d"
                  status limit)
@@ -307,6 +336,52 @@ an already verified user is never changed by an anonymous submission."
 
 (defun delete-comment (id)
   (exec "DELETE FROM comments WHERE id = ?" id))
+
+;;; ------------------------------------------------------------------
+;;; Threads
+
+(defun thread-by-key (site-id page-key)
+  (query-one "SELECT * FROM threads WHERE site_id = ? AND page_key = ?" site-id page-key))
+
+(defun thread-by-id (id)
+  (query-one "SELECT * FROM threads WHERE id = ?" id))
+
+(defun ensure-thread (site-id page-key url &optional (title ""))
+  "Return the thread for PAGE-KEY, creating it if needed. A thread keyed by
+a page id follows its page: a different URL or title is recorded."
+  (with-transaction ()
+    (let ((thread (thread-by-key site-id page-key)))
+      (cond ((null thread)
+             (thread-by-id
+              (exec "INSERT INTO threads (site_id, page_key, url, title, created_at)
+                     VALUES (?, ?, ?, ?, ?)" site-id page-key url (or title "") (iso-time))))
+            ((or (string/= url (getf thread :url))
+                 (and (not (blank-p title)) (string/= title (getf thread :title))))
+             (exec "UPDATE threads SET url = ?, title = CASE WHEN ? = '' THEN title ELSE ? END
+                    WHERE id = ?" url (or title "") (or title "") (getf thread :id))
+             (thread-by-id (getf thread :id)))
+            (t thread)))))
+
+(defun site-threads (site-id)
+  (query "SELECT t.*, (SELECT count(*) FROM comments c WHERE c.thread_id = t.id) AS comment_count
+          FROM threads t WHERE t.site_id = ? ORDER BY t.created_at DESC, t.id DESC" site-id))
+
+(defun move-thread (thread-id new-key new-url)
+  "Re-key and/or re-point a thread. If another thread of the same site
+already has NEW-KEY, merge into it: its comments move there and this
+thread is deleted. Returns the surviving thread's id."
+  (with-transaction ()
+    (let* ((thread (thread-by-id thread-id))
+           (target (thread-by-key (getf thread :site-id) new-key)))
+      (if (and target (/= (getf target :id) thread-id))
+          (progn
+            (exec "UPDATE comments SET thread_id = ? WHERE thread_id = ?" (getf target :id) thread-id)
+            (exec "UPDATE threads SET url = ? WHERE id = ?" new-url (getf target :id))
+            (exec "DELETE FROM threads WHERE id = ?" thread-id)
+            (getf target :id))
+          (progn
+            (exec "UPDATE threads SET page_key = ?, url = ? WHERE id = ?" new-key new-url thread-id)
+            thread-id)))))
 
 ;;; ------------------------------------------------------------------
 ;;; Email tokens (single use, hashed at rest)

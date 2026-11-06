@@ -4,6 +4,8 @@
  *   <script src="https://comments.ryanfleck.ca/embed.js" data-site="blog" async></script>
  *
  * Optional attributes on the <script> tag:
+ *   data-page-id     stable thread id that survives URL changes, like
+ *                    disqus_identifier (default: none; the URL is the key)
  *   data-page-url    canonical URL for this thread (default: location.href)
  *   data-page-title  title shown in the admin/profile (default: document.title)
  *   data-target      id of the container element (default: "rf-comments")
@@ -31,6 +33,8 @@
     page: script.getAttribute("data-page-url") || location.href,
     title: script.getAttribute("data-page-title") || document.title || ""
   });
+  var pageId = script.getAttribute("data-page-id");
+  if (pageId) params.set("id", pageId);
 
   var iframe = document.createElement("iframe");
   iframe.src = base + "/thread?" + params.toString();

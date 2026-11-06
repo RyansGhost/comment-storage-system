@@ -109,6 +109,13 @@
   (truncate-string (cl-ppcre:regex-replace-all "\\s+" (strip-control-chars (trim title)) " ")
                    200))
 
+(defun clean-page-id (id)
+  "Validate an embed's data-page-id (like disqus_identifier)."
+  (let ((id (trim id)))
+    (if (and (<= 1 (length id) 200) (cl-ppcre:scan "^[A-Za-z0-9._:/-]+$" id))
+        id
+        (values nil "Invalid page id: use 1-200 letters, digits or . _ : / -"))))
+
 (defun valid-site-key-p (key)
   (and (stringp key) (<= 1 (length key) 40)
        (cl-ppcre:scan "^[a-z0-9][a-z0-9-]*$" key)))

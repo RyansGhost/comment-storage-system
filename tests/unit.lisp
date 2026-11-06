@@ -106,12 +106,15 @@ https://b.example.com/, https://a.example.com  not-a-url")
         (is (string= "B" (getf (rf-comments::find-or-create-user "a@example.com" "Mallory")
                                :display-name)))
         ;; Comments: pending ones are only visible to their author.
-        (let ((cid (rf-comments::create-comment :site-id site-id :user-id (getf u :id)
-                                                :page-url "https://blog.example.com/x"
-                                                :body "hi")))
-          (is (null (rf-comments::page-comments site-id "https://blog.example.com/x")))
-          (is (= 1 (length (rf-comments::page-comments site-id "https://blog.example.com/x"
-                                                       :viewer-id (getf u :id)))))
+        (let* ((tid (getf (rf-comments::ensure-thread site-id "https://blog.example.com/x"
+                                                      "https://blog.example.com/x")
+                          :id))
+               (cid (rf-comments::create-comment :site-id site-id :thread-id tid
+                                                 :user-id (getf u :id)
+                                                 :page-url "https://blog.example.com/x"
+                                                 :body "hi")))
+          (is (null (rf-comments::page-comments tid)))
+          (is (= 1 (length (rf-comments::page-comments tid :viewer-id (getf u :id)))))
           ;; Tokens are single use and stored hashed.
           (let ((raw (rf-comments::issue-token (getf u :id) "verify" :comment-id cid)))
             (is (null (rf-comments:query-one "SELECT * FROM tokens WHERE token_hash = ?" raw)))
@@ -123,7 +126,7 @@ https://b.example.com/, https://a.example.com  not-a-url")
             (is (null (rf-comments::consume-token raw "login"))))
           (is (= 2 (rf-comments::recent-email-count (getf u :id))))
           (rf-comments::set-comment-status cid "published")
-          (is (= 1 (length (rf-comments::page-comments site-id "https://blog.example.com/x"))))
+          (is (= 1 (length (rf-comments::page-comments tid))))
           (is (getf (rf-comments::comment-by-id cid) :published-at))
           (is (= 1 (length (rf-comments::recent-comments :status "published"))))
           (is (= 0 (length (rf-comments::recent-comments :status "hidden")))))
@@ -160,3 +163,44 @@ https://b.example.com/, https://a.example.com  not-a-url")
                    (:on-error (e) (list :error e))
                  (list a b c))))
     (is (equal '(2 1) evaluated))))
+
+(test thread-migration-backfills-existing-comments
+  ;; Build a database at schema version 2 (before threads existed), with
+  ;; comments on two pages, then upgrade it.
+  (let ((path (namestring (merge-pathnames (format nil "rf-mig-~a.db" (random-token 6))
+                                           (uiop:temporary-directory)))))
+    (unwind-protect
+         (progn
+           (let ((rf-comments::*migrations* (subseq rf-comments::*migrations* 0 2)))
+             (with-temp-db (path)
+               (rf-comments:exec "INSERT INTO sites (key, name, origins, created_at)
+                                  VALUES ('blog', 'Blog', 'https://b.example.com', 'T')")
+               (rf-comments:exec "INSERT INTO users (email, display_name, created_at)
+                                  VALUES ('a@example.com', 'A', 'T')")
+               (loop for (page title) in '(("https://b.example.com/a" "Page A")
+                                           ("https://b.example.com/a" "Page A")
+                                           ("https://b.example.com/b" "Page B"))
+                     do (rf-comments:exec
+                         "INSERT INTO comments (site_id, user_id, page_url, page_title, body,
+                                                status, created_at)
+                          VALUES (1, 1, ?, ?, 'x', 'published', '2026-01-01T00:00:00Z')"
+                         page title))))
+           (with-temp-db (path)
+             (let ((threads (rf-comments:query "SELECT * FROM threads ORDER BY page_key")))
+               (is (= 2 (length threads)))
+               (is (equal '("https://b.example.com/a" "https://b.example.com/b")
+                          (mapcar (lambda (th) (getf th :page-key)) threads)))
+               (is (string= "Page A" (getf (first threads) :title))))
+             (is (null (rf-comments:query "SELECT * FROM comments WHERE thread_id IS NULL")))
+             (is (= 2 (length (rf-comments::page-comments
+                               (getf (rf-comments::thread-by-key 1 "https://b.example.com/a")
+                                     :id)))))))
+      (dolist (suffix '("" "-wal" "-shm"))
+        (uiop:delete-file-if-exists (concatenate 'string path suffix))))))
+
+(test page-ids
+  (is (string= "post-42" (rf-comments::clean-page-id " post-42 ")))
+  (is (string= "blog/2026/hello_world.v2" (rf-comments::clean-page-id "blog/2026/hello_world.v2")))
+  (is (null (rf-comments::clean-page-id "has space")))
+  (is (null (rf-comments::clean-page-id "<script>")))
+  (is (null (rf-comments::clean-page-id (make-string 201 :initial-element #\a)))))

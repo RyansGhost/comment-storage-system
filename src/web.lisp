@@ -43,10 +43,10 @@
 ;;; ------------------------------------------------------------------
 ;;; Thread (the iframe document)
 
-(defun thread-path (site-key page title &key notice anchor)
+(defun thread-path (site-key page title &key page-id notice anchor)
   (format nil "/thread?~a~@[#~a~]"
-          (query-string "site" site-key "page" page "title" (unless (blank-p title) title)
-                        "notice" notice)
+          (query-string "site" site-key "page" page "id" page-id
+                        "title" (unless (blank-p title) title) "notice" notice)
           anchor))
 
 (defun frame-ancestors (site)
@@ -57,12 +57,13 @@
   (respond (html-page (:title "Comments" :css "")
              (:main.rf (:p.rf-empty message)))))
 
-(defun render-thread (site page-url title &key user notice error form (status 200))
+(defun render-thread (site page-url title &key page-id thread user notice error form
+                                                (status 200))
   (set-security-headers :frame-ancestors (frame-ancestors site))
-  (let* ((comments (page-comments (getf site :id) page-url :viewer-id (getf user :id)))
+  (let* ((comments (page-comments (getf thread :id) :viewer-id (getf user :id)))
          (published (count "published" comments :key (lambda (c) (getf c :status))
                                                 :test #'string=))
-         (here (thread-path (getf site :key) page-url title)))
+         (here (thread-path (getf site :key) page-url title :page-id page-id)))
     (respond
      (html-page (:title "Comments" :css "" :extra-css (theme-css site))
        (:main.rf
@@ -85,6 +86,7 @@
         (:form.rf-form :method "post" :action "/thread/comment"
          (:input :type "hidden" :name "site" :value (getf site :key))
          (:input :type "hidden" :name "page" :value page-url)
+         (when page-id (:input :type "hidden" :name "id" :value page-id))
          (:input :type "hidden" :name "title" :value (or title ""))
          (if user
              (:p.rf-muted "Commenting as " (:strong (getf user :display-name)) " · "
@@ -118,36 +120,51 @@
        (:script :src "/static/thread.js"))
      :status status)))
 
-(defun resolve-thread (site-key page)
-  "Return (values site page-url) or (values nil error-message)."
+(defun resolve-thread (site-key page &optional raw-page-id)
+  "Return (values site page-url page-id page-key), or (values nil error-message).
+The thread key is the embed's data-page-id when given, else the page URL."
   (let ((site (and site-key (site-by-key site-key)))
-        (page-url (canonical-page-url page)))
+        (page-url (canonical-page-url page))
+        (page-id (unless (blank-p raw-page-id) (clean-page-id raw-page-id))))
     (cond ((or (null site) (not (getf site :enabled)))
            (values nil "Comments are not enabled for this site."))
           ((null page-url) (values nil "This page can't be commented on."))
           ((not (site-allows-page-p site page-url))
            (values nil "Comments are not enabled for this domain."))
-          (t (values site page-url)))))
+          ((and (not (blank-p raw-page-id)) (null page-id))
+           (values nil "This page's comment id is invalid."))
+          (t (values site page-url page-id (or page-id page-url))))))
 
-(defpage thread ("/thread") (&get site page title notice)
-  (multiple-value-bind (site page-url) (resolve-thread site page)
-    (if site
-        (render-thread site page-url (clean-title title) :user (current-user) :notice notice)
-        (unavailable-thread page-url))))
+(defpage thread ("/thread") (&get site page id title notice)
+  (multiple-value-bind (site page-url page-id key) (resolve-thread site page id)
+    (if (null site)
+        (unavailable-thread page-url)
+        (let* ((title (clean-title title))
+               (thread (thread-by-key (getf site :id) key)))
+          ;; A thread keyed by page id follows its page when the URL changes.
+          (when (and thread page-id)
+            (setf thread (ensure-thread (getf site :id) key page-url title)))
+          (render-thread site page-url title :page-id page-id :thread thread
+                                             :user (current-user) :notice notice)))))
 
 (defaction post-comment ("/thread/comment")
-    (&post site page title name email body website)
-  (multiple-value-bind (site page-url) (resolve-thread site page)
+    (&post site page id title name email body website)
+  (multiple-value-bind (site page-url page-id key) (resolve-thread site page id)
     (unless site
       (return-from post-comment (unavailable-thread page-url)))
     (let* ((title (clean-title title))
            (user (current-user))
            (form (list :name name :email email :body body)))
       (flet ((fail (message &optional (status 422))
-               (render-thread site page-url title :user user :error message :form form
+               (render-thread site page-url title :page-id page-id
+                                                  :thread (thread-by-key (getf site :id) key)
+                                                  :user user :error message :form form
                                                   :status status))
              (back-to-thread (&rest args)
-               (redirect-to (apply #'thread-path (getf site :key) page-url title args))))
+               (redirect-to (apply #'thread-path (getf site :key) page-url title
+                                   :page-id page-id args)))
+             (thread-id ()
+               (getf (ensure-thread (getf site :id) key page-url title) :id)))
         ;; Bots fill in every field; humans never see this one.
         (unless (blank-p website)
           (return-from post-comment (back-to-thread :notice "check-email")))
@@ -158,7 +175,8 @@
             ;; Signed in: the email is already proven, publish immediately.
             (with-valid-inputs ((clean-body clean-body body))
                 (:on-error (message) (fail message))
-              (let ((id (create-comment :site-id (getf site :id) :user-id (getf user :id)
+              (let ((id (create-comment :site-id (getf site :id) :thread-id (thread-id)
+                                        :user-id (getf user :id)
                                         :page-url page-url :page-title title :body clean-body
                                         :status "pending" :ip-hash (hash-ip (client-ip)))))
                 (publish-comment (comment-by-id id) :author)
@@ -168,7 +186,8 @@
                                 (clean-email normalize-email email))
                 (:on-error (message) (fail message))
               (let* ((user (find-or-create-user clean-email clean-name))
-                     (id (create-comment :site-id (getf site :id) :user-id (getf user :id)
+                     (id (create-comment :site-id (getf site :id) :thread-id (thread-id)
+                                         :user-id (getf user :id)
                                          :page-url page-url :page-title title
                                          :body clean-body :status "pending"
                                          :ip-hash (hash-ip (client-ip)))))
@@ -215,7 +234,7 @@
                                 (or (getf comment :page-url) "the page"))
                         "/verify" token "Publish my comment"
                         :excerpt (getf comment :body)
-                        :redirect-origin (url-origin (getf comment :page-url))))
+                        :redirect-origin (url-origin (getf comment :link-url))))
         (expired-link))))
 
 (defaction verify-post ("/verify") (&post token)
@@ -228,7 +247,7 @@
           (when (and comment (string= (getf comment :status) "pending"))
             (publish-comment comment :author))
           (redirect-to (if comment
-                           (format nil "~a#rf-comments" (getf comment :page-url))
+                           (format nil "~a#rf-comments" (getf comment :link-url))
                            "/me"))))))
 
 ;;; ------------------------------------------------------------------
@@ -324,9 +343,9 @@
               (dolist (c comments)
                 (:tr
                  (:td (human-date (getf c :created-at)))
-                 (:td (:a :href (getf c :page-url) :target "_blank" :rel "noopener"
+                 (:td (:a :href (getf c :link-url) :target "_blank" :rel "noopener"
                           (if (blank-p (getf c :page-title))
-                              (getf c :page-url)
+                              (getf c :link-url)
                               (getf c :page-title))))
                  (:td (truncate-string (getf c :body) 160))
                  (:td (getf c :status))
@@ -361,9 +380,10 @@
 (easy-routes:defroute thread-js ("/static/thread.js" :method :get) ()
   (serve-js "thread.js"))
 
-(easy-routes:defroute api-comments ("/api/comments" :method :get) (&get site page)
+(easy-routes:defroute api-comments ("/api/comments" :method :get) (&get site page id)
   (setf (ht:content-type*) "application/json")
-  (multiple-value-bind (site page-url) (resolve-thread site page)
+  (multiple-value-bind (site page-url page-id key) (resolve-thread site page id)
+    (declare (ignore page-id))
     (if (null site)
         (progn (setf (ht:return-code*) 404)
                (jzon:stringify (alexandria:plist-hash-table (list "error" page-url)
@@ -374,7 +394,7 @@
                   (ht:header-out "Vary") "Origin"))
           (jzon:stringify
            (coerce
-            (loop for c in (page-comments (getf site :id) page-url)
+            (loop for c in (page-comments (getf (thread-by-key (getf site :id) key) :id))
                   collect (alexandria:plist-hash-table
                            (list "id" (getf c :id) "author" (getf c :display-name)
                                  "body" (getf c :body) "created_at" (getf c :created-at))

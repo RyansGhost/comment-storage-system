@@ -104,8 +104,8 @@
               (:tr
                (:td (human-date (getf c :created-at)))
                (:td (:code (getf c :site-key)) (:br)
-                    (:a :href (getf c :page-url) :target "_blank" :rel "noopener"
-                        (truncate-string (getf c :page-url) 60)))
+                    (:a :href (getf c :link-url) :target "_blank" :rel "noopener"
+                        (truncate-string (getf c :link-url) 60)))
                (:td (getf c :display-name) (:br)
                     (:small.rf-muted (getf c :email)
                                      (if (getf c :verified-at) " ✓" " (unverified)")))
@@ -205,9 +205,11 @@
         (:div.rf-actions (:span) (:button :type "submit" (if site "Save" "Create site"))))
        (when site
          (:h2 "Embed code")
-         (:p.rf-muted "Paste this where comments should appear. "
-                      "Optional attributes: data-page-url (canonical URL), data-page-title.")
+         (:p.rf-muted "Paste this where comments should appear. Optional attributes: "
+                      "data-page-id (a stable thread id that survives URL changes), "
+                      "data-page-url (canonical URL), data-page-title.")
          (:pre (embed-snippet (getf site :key)))
+         (threads-section site)
          (when (getf site :origins)
            (:h2 "Preview")
            (:iframe.preview
@@ -218,6 +220,55 @@
          (:form :method "post" :action (format nil "/admin/sites/~d/delete" id)
                 (:button.rf-danger :type "submit" "Delete site and all its comments"))))
      :status status)))
+
+(defun threads-section (site)
+  (let ((threads (site-threads (getf site :id))))
+    (spinneret:with-html
+      (:h2 "Threads")
+      (if (null threads)
+          (:p.rf-empty "No threads yet.")
+          (progn
+            (:p.rf-muted "A thread is keyed by its page id, or by its URL when the embed has "
+                         "no data-page-id. Moving a thread onto a key that another thread "
+                         "already uses merges the two.")
+            (:table
+             (:thead (:tr (:th "Key / URL") (:th "Comments") (:th "Move to")))
+             (:tbody
+              (dolist (th threads)
+                (:tr
+                 (:td (:code (getf th :page-key)) (:br)
+                      (:a :href (getf th :url) :target "_blank" :rel "noopener"
+                          (if (blank-p (getf th :title)) (getf th :url) (getf th :title))))
+                 (:td (princ-to-string (getf th :comment-count)))
+                 (:td (:form.rf-form :method "post"
+                                     :action (format nil "/admin/threads/~d/move" (getf th :id))
+                       (:input :name "key" :value (getf th :page-key) :maxlength 200
+                               :aria-label "Key")
+                       (:input :name "url" :value (getf th :url) :required t
+                               :aria-label "URL")
+                       (:button.rf-secondary :type "submit" "Move"))))))))))))
+
+(defun clean-thread-key (key)
+  "A page id, or a URL (canonicalised)."
+  (let ((url (canonical-page-url key)))
+    (or url (clean-page-id key))))
+
+(defaction admin-thread-move ("/admin/threads/:id/move" :decorators (@admin))
+    (&post key url &path (id 'integer))
+  (let* ((thread (thread-by-id id))
+         (site (and thread (site-by-id (getf thread :site-id)))))
+    (if (null thread)
+        (error-page 404 "Not found" "No such thread.")
+        (let ((new-url (canonical-page-url url)))
+          (flet ((fail (message) (site-form-page :site site :error message :status 422)))
+            (cond ((or (null new-url) (not (site-allows-page-p site new-url)))
+                   (fail "The URL must be on one of this site's allowed origins."))
+                  (t
+                   (with-valid-inputs ((new-key clean-thread-key
+                                                (if (blank-p key) new-url key)))
+                       (:on-error (message) (fail message))
+                     (move-thread id new-key new-url)
+                     (redirect-to (format nil "/admin/sites/~d" (getf site :id)))))))))))
 
 (defun site-form-values ()
   (let ((theme (make-hash-table :test #'equal)))

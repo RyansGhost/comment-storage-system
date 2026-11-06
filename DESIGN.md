@@ -221,3 +221,21 @@ broken observer, even one added later from a REPL, is logged and can't fail
 the request. Signed-in posts are created `pending` and immediately
 published through `publish-comment`, so every publish takes one code path.
 
+### Stable thread ids (book ch. 4: "On natural IDs")
+
+A page URL is a natural key, and natural keys change: slugs get renamed and
+domains move. Migration 3 adds `threads(site_id, page_key, url, title)`,
+with `page_key` unique per site, and `comments.thread_id`. Each existing
+`(site_id, page_url)` pair is backfilled as a URL-keyed thread.
+`comments.page_url` stays the URL the comment was posted from
+(requirement 7).
+
+- The key is the embed's `data-page-id` when present, else the canonical
+  URL. A page id equal to an old URL adopts that URL's thread.
+- GET `/thread` never creates rows. POST creates the thread on first
+  comment. A page-id thread updates its stored URL/title whenever its page
+  is viewed elsewhere.
+- Links in emails, profiles and the admin use the thread's current URL.
+- Admin `POST /admin/threads/:id/move` re-keys or re-points a thread, merging
+  into an existing thread with the same key.
+
