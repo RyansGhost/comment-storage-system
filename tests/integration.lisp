@@ -612,3 +612,92 @@ everything the server sent back within a couple of seconds."
            (is (has "(:return (:ok" (slynk-exchange port secret))))
       (ignore-errors (uiop:symbol-call :slynk :stop-server port))
       (when old-home (sb-posix:setenv "HOME" old-home 1)))))
+
+;;; ------------------------------------------------------------------
+;;; Gravatar avatars (src/avatars.lisp)
+
+(defparameter +png+ (coerce #(137 80 78 71 13 10 26 10 1 2 3) '(vector (unsigned-byte 8))))
+
+(defun avatar-src (html)
+  (cl-ppcre:register-groups-bind (path) ("<img class=rf-avatar src=\"?(/avatar/[0-9a-f]+)" html)
+    path))
+
+(defun body-octets (path)
+  (multiple-value-bind (body status headers)
+      (dex:request (concatenate 'string *base* path) :method :get :force-binary t
+                                                     :proxy nil :keep-alive nil)
+    (values body status headers)))
+
+(test gravatar-avatars-are-proxied
+  (with-test-server ()
+    (let* ((fetched '())
+           (alice-hash (sha256-hex "alice@example.com")))
+      (with-globals ((rf-comments::*avatars* :gravatar)
+                     (rf-comments::*avatar-fetcher*
+                      (lambda (url) (push url fetched) (values +png+ "image/png"))))
+        (rf-comments::reset-avatar-cache)
+        (let ((jar (cl-cookie:make-cookie-jar)))
+          (make-blog-site (admin-jar))
+          (post-comment jar :email "Alice@Example.com")
+          (req :post "/verify" :jar jar :params `(("token" . ,(last-email-token)))))
+        (let* ((thread (req :get (thread-path)))
+               (src (avatar-src thread)))
+          (is (stringp src))
+          ;; The page never reveals the email or its Gravatar hash.
+          (is (not (has alice-hash thread)))
+          (is (not (has "alice@example.com" thread)))
+          (is (not (has "gravatar.com/avatar" thread)))
+          ;; Attribution note at the bottom of the comments section.
+          (is (has "Profile images are provided by" thread))
+          (is (has "href=\"https://gravatar.com\"" thread))
+          ;; The proxy serves Gravatar's image, fetched by hash, then cached.
+          (multiple-value-bind (body status headers) (body-octets src)
+            (is (= 200 status))
+            (is (equalp +png+ body))
+            (is (string= "image/png" (gethash "content-type" headers)))
+            (is (has "max-age=86400" (gethash "cache-control" headers)))
+            (is (has "default-src 'none'" (gethash "content-security-policy" headers))))
+          (body-octets src)
+          (is (= 1 (length fetched)))
+          (is (has alice-hash (first fetched)))
+          (is (has "d=identicon" (first fetched)))
+          ;; Unknown keys are 404s.
+          (is (= 404 (nth-value 1 (req :get "/avatar/0123456789abcdef0123")))))))))
+
+(test gravatar-failures-fall-back
+  (with-test-server ()
+    (with-globals ((rf-comments::*avatars* :gravatar)
+                   (rf-comments::*avatar-fetcher*
+                    (lambda (url) (declare (ignore url)) (error "network down"))))
+      (rf-comments::reset-avatar-cache)
+      (let ((jar (cl-cookie:make-cookie-jar))
+            (*error-output* (make-broadcast-stream)))
+        (make-blog-site (admin-jar))
+        (post-comment jar :name "zoë")
+        (req :post "/verify" :jar jar :params `(("token" . ,(last-email-token))))
+        (multiple-value-bind (body status headers) (req :get (avatar-src (req :get (thread-path))))
+          (is (= 200 status))
+          (is (has "image/svg+xml" (gethash "content-type" headers)))
+          (is (has "max-age=300" (gethash "cache-control" headers)))
+          (is (has ">Z</text>" body))))
+      ;; An upstream SVG (could carry script) is refused the same way.
+      (with-globals ((rf-comments::*avatar-fetcher*
+                      (lambda (url) (declare (ignore url))
+                        (values (babel:string-to-octets "<svg/>") "image/svg+xml"))))
+        (rf-comments::reset-avatar-cache)
+        (let ((*error-output* (make-broadcast-stream)))
+          (is (has ">Z</text>" (req :get (avatar-src (req :get (thread-path)))))))))))
+
+(test avatars-can-be-turned-off
+  (with-test-server ()
+    (with-globals ((rf-comments::*avatars* :off))
+      (let ((jar (cl-cookie:make-cookie-jar)))
+        (make-blog-site (admin-jar))
+        (post-comment jar)
+        (req :post "/verify" :jar jar :params `(("token" . ,(last-email-token))))
+        (let ((thread (req :get (thread-path))))
+          (is (has "1 comment" thread))
+          (is (null (avatar-src thread)))
+          (is (not (has "Gravatar" thread))))
+        (let ((key (getf (rf-comments:query-one "SELECT avatar_key FROM users") :avatar-key)))
+          (is (= 404 (nth-value 1 (req :get (format nil "/avatar/~a" key))))))))))

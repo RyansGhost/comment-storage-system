@@ -17,6 +17,11 @@ Used to build links in emails and to verify the Origin of POST requests.")
 (defvar *email-backend* :log
   "One of :SES (send through Amazon SES), :LOG (print to stdout) or
 :CAPTURE (push onto *CAPTURED-EMAILS*; used by the tests).")
+(defvar *avatars* :gravatar
+  "Profile images: :GRAVATAR (proxied through /avatar/…) or :OFF.")
+(defvar *avatar-default* "identicon"
+  "Gravatar's d= fallback for addresses without a Gravatar: identicon, mp,
+monsterid, wavatar, retro, robohash or blank.")
 (defvar *ses-from* "Comments <comments@example.com>")
 (defvar *aws-region* "us-east-1")
 (defvar *aws-access-key-id* nil)
@@ -60,6 +65,8 @@ Used to build links in emails and to verify the Origin of POST requests.")
         *admin-email* (env "ADMIN_EMAIL" *admin-email*)
         *email-backend* (intern (string-upcase (env "EMAIL_BACKEND" (string *email-backend*)))
                                 :keyword)
+        *avatars* (intern (string-upcase (env "AVATARS" (string *avatars*))) :keyword)
+        *avatar-default* (env "AVATAR_DEFAULT" *avatar-default*)
         *ses-from* (env "SES_FROM" *ses-from*)
         *aws-region* (env "AWS_REGION" *aws-region*)
         *aws-access-key-id* (env "AWS_ACCESS_KEY_ID" *aws-access-key-id*)
@@ -71,6 +78,13 @@ Used to build links in emails and to verify the Origin of POST requests.")
                                   (uiop:string-prefix-p "https://" *public-url*)))
   (unless (member *email-backend* '(:ses :log :capture))
     (error "EMAIL_BACKEND must be ses or log, not ~(~a~)" *email-backend*))
+  (unless (member *avatars* '(:gravatar :off))
+    (error "AVATARS must be gravatar or off, not ~(~a~)" *avatars*))
+  (unless (member *avatar-default* '("identicon" "mp" "monsterid" "wavatar" "retro"
+                                     "robohash" "blank")
+                  :test #'string=)
+    (error "AVATAR_DEFAULT must be one of identicon, mp, monsterid, wavatar, retro, ~
+            robohash or blank"))
   (when (and (eq *email-backend* :ses)
              (not (and *aws-access-key-id* *aws-secret-access-key*)))
     (error "EMAIL_BACKEND=ses requires AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY"))

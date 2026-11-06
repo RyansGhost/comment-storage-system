@@ -17,7 +17,14 @@ a{color:var(--rf-accent)}
 .rf{padding:4px 2px 8px}
 .rf h2{font-size:1.1em;margin:0 0 .75em}
 .rf-list{list-style:none;margin:0 0 1.25em;padding:0}
-.rf-comment{padding:.75em 0;border-top:1px solid var(--rf-border)}
+.rf-comment{padding:.75em 0;border-top:1px solid var(--rf-border);display:flex;gap:.75em;
+align-items:flex-start}
+.rf-main{flex:1;min-width:0}
+.rf-avatar{width:40px;height:40px;border-radius:50%;flex:none;background:var(--rf-border);
+object-fit:cover}
+.rf-hello{display:flex;gap:.75em;align-items:center;margin:0 0 1em}
+.rf-hello h1{margin:0}
+.rf-footer .rf-attribution{display:block;margin-top:.25em}
 .rf-comment:first-child{border-top:0}
 .rf-meta{display:flex;flex-wrap:wrap;gap:.5em;align-items:baseline;font-size:.9em}
 .rf-meta time,.rf-muted{color:var(--rf-muted)}

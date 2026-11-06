@@ -277,3 +277,27 @@ Here the same idea is a single SQL `GROUP BY` per question (see
   container survives a wrong secret and completes a real protocol handshake
   with the right one.
 
+### Gravatar profile images
+
+Comments show Gravatar images, looked up by SHA-256 of the trimmed,
+lowercased email (Gravatar's current scheme;
+`https://gravatar.com/avatar/<hash>?s=80&d=<default>&r=g`).
+
+- **Privacy:** pages never contain that hash or a gravatar.com URL. It
+  would reveal emails to anyone guessing addresses, contradicting "Email
+  (never shown)", and would send every reader's IP to Gravatar. Instead,
+  migration 4 gives each user a random `avatar_key`, pages use
+  `/avatar/<key>`, and the server fetches and serves the image from our own
+  origin, so CSP `img-src 'self'` is unchanged.
+- **Caching:** in memory for 24 h (at most 2000 entries); responses carry
+  `Cache-Control: max-age=86400`.
+- **Safety:** only PNG/JPEG/GIF/WebP are accepted from upstream. An SVG
+  served from our origin could carry script, so the avatar responses also
+  send `Content-Security-Policy: default-src 'none'`.
+- **Failure handling:** a stale cached copy, else a generated SVG initial
+  (cached 5 minutes).
+- **Attribution:** "Profile images are provided by Gravatar." appears at
+  the bottom of the comment section, under the form, where readers look for
+  service notes. The profile page explains how to change your image.
+  `AVATARS=off` removes images, note and route.
+

@@ -129,7 +129,13 @@
      "UPDATE comments SET thread_id =
         (SELECT t.id FROM threads t
          WHERE t.site_id = comments.site_id AND t.page_key = comments.page_url)"
-     "CREATE INDEX comments_thread ON comments(thread_id, status, created_at)")))
+     "CREATE INDEX comments_thread ON comments(thread_id, status, created_at)")
+    (4
+     ;; Opaque per-user key for /avatar/<key>, so pages never contain a hash
+     ;; of anyone's email address (see avatars.lisp).
+     "ALTER TABLE users ADD COLUMN avatar_key TEXT"
+     "UPDATE users SET avatar_key = lower(hex(randomblob(10)))"
+     "CREATE UNIQUE INDEX users_avatar_key ON users(avatar_key)")))
 
 (defun migrate ()
   (exec "CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -254,6 +260,8 @@
 
 (defun user-by-id (id) (query-one "SELECT * FROM users WHERE id = ?" id))
 (defun user-by-email (email) (query-one "SELECT * FROM users WHERE email = ?" email))
+(defun user-by-avatar-key (key)
+  (query-one "SELECT * FROM users WHERE avatar_key = ?" key))
 
 (defun find-or-create-user (email display-name)
   "Return the user row for EMAIL, creating it if needed. The display name of
@@ -262,8 +270,9 @@ an already verified user is never changed by an anonymous submission."
     (let ((user (user-by-email email)))
       (cond ((null user)
              (user-by-id
-              (exec "INSERT INTO users (email, display_name, created_at) VALUES (?, ?, ?)"
-                    email display-name (iso-time))))
+              (exec "INSERT INTO users (email, display_name, avatar_key, created_at)
+                     VALUES (?, ?, ?, ?)"
+                    email display-name (random-token 10) (iso-time))))
             ((and (null (getf user :verified-at))
                   (string/= display-name (getf user :display-name)))
              (exec "UPDATE users SET display_name = ? WHERE id = ?" display-name (getf user :id))
@@ -302,7 +311,8 @@ an already verified user is never changed by an anonymous submission."
 
 (defun page-comments (thread-id &key viewer-id)
   "Published comments in a thread, plus the viewer's own pending ones."
-  (query "SELECT c.id, c.body, c.status, c.created_at, c.user_id, u.display_name
+  (query "SELECT c.id, c.body, c.status, c.created_at, c.user_id, u.display_name,
+                 u.avatar_key
           FROM comments c JOIN users u ON u.id = c.user_id
           WHERE c.thread_id = ?
             AND (c.status = 'published' OR (c.status = 'pending' AND c.user_id = ?))

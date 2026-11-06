@@ -27,6 +27,7 @@
                              (:file "db")
                              (:file "email")
                              (:file "events")
+                             (:file "avatars")
                              (:file "views")
                              (:file "routes")
                              (:file "web")
