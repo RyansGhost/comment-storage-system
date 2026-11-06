@@ -203,3 +203,21 @@ of the route's definition, not something each handler must remember. A test
 checks easy-routes' registry so that no POST route can skip it.
 `with-valid-inputs` flattens validation chains.
 
+### Comment observers (book ch. 4: CLOS method combinations)
+
+`src/events.lisp` turns `publish-comment`, `hide-comment` and
+`remove-comment` into generic functions of `(comment by)`, where `by` is
+`:author` or `:admin`. Primary methods only change the database. Side
+effects are `:after` methods:
+
+- `(comment by)`: write `moderation_log` (migration 2), shown as "Activity"
+  in the admin.
+- `(comment (by (eql :author)))`: email `ADMIN_EMAIL` about the new comment.
+  It's specialised on the actor, so admin moderation never notifies.
+
+The generic functions use a custom `observed` method combination: standard
+semantics, except each `:after` method runs in its own error handler. A
+broken observer, even one added later from a REPL, is logged and can't fail
+the request. Signed-in posts are created `pending` and immediately
+published through `publish-comment`, so every publish takes one code path.
+

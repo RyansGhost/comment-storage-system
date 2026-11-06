@@ -25,6 +25,7 @@
                              (:file "util")
                              (:file "db")
                              (:file "email")
+                             (:file "events")
                              (:file "views")
                              (:file "routes")
                              (:file "web")

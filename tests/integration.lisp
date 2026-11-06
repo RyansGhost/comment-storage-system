@@ -346,3 +346,77 @@ Returns (values body status headers-hash-table)."
             "~a accepted a POST without Origin" path)
         (is (= 403 (nth-value 1 (req :post path :origin "https://evil.example.com")))
             "~a accepted a cross-site POST" path)))))
+
+;;; ------------------------------------------------------------------
+;;; Observers (src/events.lisp)
+
+(defun emails-to (address)
+  (remove address rf-comments:*captured-emails*
+          :key (lambda (e) (getf e :to)) :test-not #'string=))
+
+(defun log-actions ()
+  (mapcar (lambda (row) (list (getf row :action) (getf row :actor)))
+          (reverse (rf-comments::recent-moderation 100))))
+
+(test observers-notify-admin-and-log-moderation
+  (with-test-server ()
+    (with-globals ((rf-comments::*admin-email* "admin@example.com"))
+      (let ((admin (admin-jar))
+            (alice (cl-cookie:make-cookie-jar)))
+        (make-blog-site admin)
+        ;; Pending comments don't notify the admin.
+        (post-comment alice :body "first")
+        (is (null (emails-to "admin@example.com")))
+        ;; Publishing through the verify link does.
+        (req :post "/verify" :jar alice :params `(("token" . ,(last-email-token))))
+        (is (= 1 (length (emails-to "admin@example.com"))))
+        (let ((mail (first (emails-to "admin@example.com"))))
+          (is (has "New comment by Alice" (getf mail :subject)))
+          (is (has "first" (getf mail :text)))
+          (is (has "/admin?status=published" (getf mail :text))))
+        ;; A signed-in comment publishes (and notifies) immediately.
+        (post-comment alice :body "second")
+        (is (= 2 (length (emails-to "admin@example.com"))))
+        ;; Admin moderation is logged but never emails the admin.
+        (let ((id (getf (rf-comments:query-one "SELECT id FROM comments WHERE body = 'second'") :id))
+              (first-id (getf (rf-comments:query-one "SELECT id FROM comments WHERE body = 'first'") :id)))
+          (req :post (format nil "/admin/comments/~d/hide" id) :jar admin)
+          (req :post (format nil "/admin/comments/~d/publish" id) :jar admin)
+          (req :post (format nil "/me/comments/~d/delete" first-id) :jar alice)
+          (req :post (format nil "/admin/comments/~d/delete" id) :jar admin))
+        (is (= 2 (length (emails-to "admin@example.com"))))
+        (is (equal '(("publish" "author") ("publish" "author") ("hide" "admin")
+                     ("publish" "admin") ("delete" "author") ("delete" "admin"))
+                   (log-actions)))
+        ;; The log survives deletion and shows on the dashboard.
+        (let ((dash (req :get "/admin" :jar admin)))
+          (is (has "Activity" dash))
+          (is (has "Alice on https://blog.example.com/posts/hello/: second" dash)))))))
+
+(test no-admin-email-when-unset
+  (with-test-server ()
+    (with-globals ((rf-comments::*admin-email* nil))
+      (let ((jar (cl-cookie:make-cookie-jar)))
+        (make-blog-site (admin-jar))
+        (post-comment jar)
+        (req :post "/verify" :jar jar :params `(("token" . ,(last-email-token))))
+        ;; Only the verification email was sent.
+        (is (= 1 (length rf-comments:*captured-emails*)))
+        (is (has "1 comment" (req :get (thread-path))))))))
+
+(test failing-observer-does-not-break-requests
+  (with-test-server ()
+    (let ((method (defmethod rf-comments::publish-comment :after ((comment cons) by)
+                    (declare (ignore by))
+                    (error "observer exploded"))))
+      (unwind-protect
+           (let ((jar (cl-cookie:make-cookie-jar))
+                 (*error-output* (make-broadcast-stream)))
+             (make-blog-site (admin-jar))
+             (post-comment jar)
+             (is (= 303 (nth-value 1 (req :post "/verify" :jar jar
+                                                          :params `(("token" . ,(last-email-token)))))))
+             ;; The primary method and the other observers still ran.
+             (is (has "1 comment" (req :get (thread-path))))
+             (is (equal '(("publish" "author")) (log-actions))))
+        (remove-method #'rf-comments::publish-comment method)))))

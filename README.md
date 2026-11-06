@@ -155,6 +155,7 @@ All configuration comes from environment variables (`.env`):
 | `PORT` | `8080` | Listen port inside the container |
 | `DB_PATH` | `/data/comments.db` | SQLite file |
 | `ADMIN_PASSWORD` | *(unset)* | Admin password. Unset disables `/admin`. |
+| `ADMIN_EMAIL` | *(unset)* | Address to notify whenever a commenter publishes a comment. Unset disables notifications. |
 | `EMAIL_BACKEND` | `log` | `ses`, or `log` to print emails (with links) to the log |
 | `SES_FROM` | | From address; must be a verified SES identity |
 | `AWS_REGION` | `us-east-1` | SES region |
@@ -183,6 +184,11 @@ Tunables (limits, token lifetimes) are special variables at the top of
   appear on the edit page.
 - **Moderation:** recent comments, filterable by status, with publish, hide,
   and delete actions.
+- **Activity:** an audit log of the last 50 publish/hide/delete actions and
+  who did them (`author` or `admin`). Entries outlive deleted comments.
+- **Notifications:** with `ADMIN_EMAIL` set, you get an email each time a
+  commenter publishes a comment (via the verify link or while signed in),
+  with a link to the moderation queue. Your own admin actions never notify.
 
 ### How commenting works
 
@@ -399,6 +405,7 @@ src/
   config.lisp          env-var configuration + tunables
   util.lisp            time, crypto, URL canonicalisation, validation, rate limiter
   db.lisp              SQLite connection, migrations, data model queries
+  events.lisp          publish/hide/remove as generic functions; :after observers
   email.lisp           SES v2 SendEmail + SigV4 signer + email templates
   views.lisp           Spinneret layout, CSS, per-site themes
   routes.lisp          request helpers, decorators, defpage/defaction/with-valid-inputs
