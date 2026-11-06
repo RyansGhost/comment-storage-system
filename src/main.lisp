@@ -44,6 +44,7 @@ Used by Docker's HEALTHCHECK so the image needs no curl."
   (handler-case
       (progn
         (load-config)
+        (load-repl-config)
         (when (member "healthcheck" (uiop:command-line-arguments) :test #'string=)
           (healthcheck))
         (when (and (eq *email-backend* :log) (uiop:string-prefix-p "https://" *public-url*))
@@ -52,6 +53,7 @@ Used by Docker's HEALTHCHECK so the image needs no curl."
           (format *error-output* "~&;; NOTE: ADMIN_PASSWORD unset — /admin is disabled.~%"))
         (push (lambda () (stop)) sb-ext:*exit-hooks*)
         (start)
+        (maybe-start-slynk)
         (loop (sleep 3600)
               (ignore-errors (purge-expired))))
     (sb-sys:interactive-interrupt ()

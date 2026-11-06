@@ -187,6 +187,9 @@ All configuration comes from environment variables (`.env`):
 | `SES_CONFIGURATION_SET` | | Optional SES configuration set |
 | `TRUST_PROXY` | `false` | Take the client IP from the last `X-Forwarded-For` entry |
 | `COOKIE_SECURE` | on if `PUBLIC_URL` is https | Mark cookies `Secure` |
+| `SLYNK_PORT` | *(unset: no REPL)* | Port for the [live REPL](#live-repl-in-production) |
+| `SLYNK_SECRET` | | Required with `SLYNK_PORT`, 16+ characters |
+| `SLYNK_INTERFACE` | `127.0.0.1` | Interface the REPL binds to (`0.0.0.0` inside Docker, via the override file) |
 
 Tunables (limits, token lifetimes) are special variables at the top of
 [`src/config.lisp`](src/config.lisp).
@@ -441,6 +444,7 @@ src/
   routes.lisp          request helpers, decorators, defpage/defaction/with-valid-inputs
   web.lisp             public routes: /thread, /verify, /login, /me, /api, /embed.js
   admin.lisp           /admin: sites, themes, moderation
+  repl.lisp            opt-in live REPL (Slynk) with secret + hardening
   main.lisp            start/stop, executable entry point, healthcheck
 static/embed.js        the loader script sites include
 static/thread.js       iframe height reporting (postMessage)
@@ -450,6 +454,7 @@ dev/start.lisp         REPL bootstrap for development
 build.lisp             builds bin/rf-comments (save-lisp-and-die)
 Dockerfile             build → test → runtime stages
 docker-compose.yml     production service definition
+docker-compose.repl.yml  opt-in override exposing the live REPL on loopback
 deploy/                Caddy / nginx examples, SES IAM policy
 DESIGN.md              requirements, gaps filled, architecture
 ```
@@ -495,6 +500,51 @@ automatically at startup.
 ```bash
 git pull && docker compose up -d --build
 ```
+
+### Live REPL in production
+
+As in the book, you can attach SLY to the **running** service: inspect
+state, try a query, or redefine a function without a restart. It's off by
+default and should stay off unless you need it, because **anyone who can
+reach the port and knows the secret can run arbitrary code** in the
+service.
+
+1. Pick a long random secret. Put it in `.env` as `SLYNK_SECRET=…`, and the
+   same value as the first line of `~/.sly-secret` on your own machine (SLY
+   sends it when connecting).
+2. Start with the override, which publishes port 4005 on the server's
+   loopback only:
+
+   ```bash
+   docker compose -f docker-compose.yml -f docker-compose.repl.yml up -d
+   ```
+
+3. Tunnel from your machine, then in Emacs run
+   `M-x sly-connect RET localhost RET 4005`:
+
+   ```bash
+   ssh -N -L 4005:127.0.0.1:4005 your-vps
+   ```
+
+4. You're in the production image: `(in-package :rf-comments)`, then
+   `(query "SELECT count(*) FROM comments")`, `C-c C-c` a fixed `defun`,
+   and so on. Changes live only in memory, so commit real fixes and
+   redeploy.
+5. Turn it off by going back to the plain compose file:
+
+   ```bash
+   docker compose up -d
+   ```
+
+Safeguards:
+- no REPL unless `SLYNK_PORT` is set;
+- it refuses to start without a 16+ character secret;
+- it binds 127.0.0.1 unless `SLYNK_INTERFACE` says otherwise;
+- connections with the wrong secret are logged and dropped, and can't crash
+  the service.
+
+Don't enable it while the container is attached to a shared Docker
+network.
 
 **Logs.** Access and error logs go to the container log:
 

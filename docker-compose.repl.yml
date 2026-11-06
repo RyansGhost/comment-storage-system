@@ -1,0 +1,20 @@
+# Opt-in live REPL for the running service. Use only when you need it:
+#
+#   docker compose -f docker-compose.yml -f docker-compose.repl.yml up -d
+#
+# Requires SLYNK_SECRET (16+ characters) in .env. The port is published to
+# the host's loopback only; reach it through an SSH tunnel:
+#
+#   ssh -L 4005:127.0.0.1:4005 your-vps     # then M-x sly-connect localhost 4005
+#
+# Anyone who can reach the port and knows the secret can run arbitrary code
+# in the service. Don't enable it while the container is attached to a
+# shared Docker network, and switch back to the plain compose file when done.
+
+services:
+  comments:
+    environment:
+      SLYNK_PORT: "4005"
+      SLYNK_INTERFACE: "0.0.0.0"   # inside the container; published to 127.0.0.1 only
+    ports:
+      - "127.0.0.1:4005:4005"

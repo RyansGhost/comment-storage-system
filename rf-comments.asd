@@ -17,6 +17,7 @@
                "babel"
                "alexandria"
                "flexi-streams"
+               "sb-posix"
                "uiop")
   :serial t
   :components ((:module "src"
@@ -30,6 +31,7 @@
                              (:file "routes")
                              (:file "web")
                              (:file "admin")
+                             (:file "repl")
                              (:file "main")))
                (:module "static"
                 :components ((:static-file "embed.js")
@@ -39,7 +41,7 @@
 
 (asdf:defsystem "rf-comments/tests"
   :description "FiveAM test-suite for rf-comments."
-  :depends-on ("rf-comments" "fiveam" "dexador" "cl-cookie")
+  :depends-on ("rf-comments" "fiveam" "dexador" "cl-cookie" "slynk")
   :serial t
   :components ((:module "tests"
                 :components ((:file "package")
