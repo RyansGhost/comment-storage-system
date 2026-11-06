@@ -563,3 +563,52 @@ Returns (values body status headers-hash-table)."
       (is (= 200 status))
       (is (has "javascript" (gethash "content-type" headers)))
       (is (has "/api/counts?" body)))))
+
+;;; ------------------------------------------------------------------
+;;; Opt-in live REPL (src/repl.lisp)
+
+(defun slynk-packet (string)
+  (format nil "~6,'0x~a" (length string) string))
+
+(defun slynk-exchange (port secret)
+  "Connect, authenticate with SECRET, ask for connection-info. Returns
+everything the server sent back within a couple of seconds."
+  (let ((socket (usocket:socket-connect "127.0.0.1" port :element-type 'character)))
+    (unwind-protect
+         (let ((stream (usocket:socket-stream socket)))
+           ;; Slynk compares the raw first packet with the secret (as SLY sends it).
+           (write-string (slynk-packet secret) stream)
+           (write-string (slynk-packet
+                          "(:emacs-rex (slynk:connection-info) \"COMMON-LISP-USER\" t 1)")
+                         stream)
+           (force-output stream)
+           (with-output-to-string (out)
+             (loop with deadline = (+ (get-internal-real-time)
+                                      (* 3 internal-time-units-per-second))
+                   while (< (get-internal-real-time) deadline)
+                   do (handler-case
+                          (if (listen stream)
+                              (write-char (read-char stream) out)
+                              (sleep 0.05))
+                        (error () (return))))))
+      (usocket:socket-close socket))))
+
+(test repl-is-off-by-default-and-fails-closed
+  (let ((*error-output* (make-broadcast-stream)))
+    (is (null (rf-comments::maybe-start-slynk :port nil)))
+    (is (null (rf-comments::maybe-start-slynk :port 4999 :secret nil)))
+    (is (null (rf-comments::maybe-start-slynk :port 4999 :secret "too-short")))))
+
+(test repl-requires-the-secret
+  (let* ((port (+ 40000 (random 10000 (make-random-state t))))
+         (secret "a-long-enough-test-secret")
+         (old-home (uiop:getenv "HOME"))
+         (*error-output* (make-broadcast-stream)))
+    (unwind-protect
+         (progn
+           (is (eql port (rf-comments::maybe-start-slynk :port port :interface "127.0.0.1"
+                                                         :secret secret)))
+           (is (not (has ":ok" (slynk-exchange port "wrong-secret"))))
+           (is (has "(:return (:ok" (slynk-exchange port secret))))
+      (ignore-errors (uiop:symbol-call :slynk :stop-server port))
+      (when old-home (sb-posix:setenv "HOME" old-home 1)))))

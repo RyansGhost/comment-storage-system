@@ -14,6 +14,10 @@
 
 (push (uiop:getcwd) asdf:*central-registry*)
 (uiop:symbol-call :ql :quickload :rf-comments)
+;; The opt-in live REPL (src/repl.lisp): Slynk plus the contribs SLY loads
+;; on connect, since the executable cannot load sources at run time.
+(uiop:symbol-call :ql :quickload
+                  (cons "slynk" (symbol-value (uiop:find-symbol* :+slynk-contribs+ :rf-comments))))
 
 (ensure-directories-exist "bin/")
 (sb-ext:save-lisp-and-die "bin/rf-comments"

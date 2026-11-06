@@ -253,3 +253,27 @@ Here the same idea is a single SQL `GROUP BY` per question (see
 - Admin stats: status counts per site, comments per day for 30 days (CSS
   bars, CSP-safe), and the top 10 threads.
 
+### Opt-in live REPL (the book's live-system development, in production)
+
+`src/repl.lisp` starts Slynk only when `SLYNK_PORT` is set.
+
+- Slynk and the contribs SLY requests are compiled into the executable by
+  `build.lisp`. They aren't dependencies of the main system, which never
+  reads `slynk:` symbols.
+- **Authentication:** Slynk compares each connection's first packet with
+  `~/.sly-secret`. The service requires `SLYNK_SECRET` (16+ characters),
+  writes it to a private `HOME` under `/tmp` (mode 700/600), and checks
+  Slynk reads it back; otherwise no REPL starts (fail closed).
+- **Binding:** `SLYNK_INTERFACE` defaults to `127.0.0.1`.
+  `docker-compose.repl.yml` binds `0.0.0.0` inside the container and
+  publishes to `127.0.0.1:4005` on the host, so access is via SSH tunnel.
+- **Hardening:** out of the box, a client with the wrong secret makes
+  Slynk's accept thread signal an unhandled error. That kills a
+  non-interactive Lisp, which would be a denial of service by anyone who can
+  reach the port, and it leaks the socket. `harden-slynk` wraps
+  `authenticate-client` (close the socket) and `accept-connections` (log and
+  keep serving).
+- **CI checks:** the default container has no listener on 4005; an opt-in
+  container survives a wrong secret and completes a real protocol handshake
+  with the right one.
+

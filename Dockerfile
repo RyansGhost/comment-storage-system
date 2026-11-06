@@ -30,7 +30,7 @@ WORKDIR /build
 COPY rf-comments.asd ./
 RUN sbcl --non-interactive --load /opt/quicklisp/setup.lisp \
       --eval '(push (uiop:getcwd) asdf:*central-registry*)' \
-      --eval '(ql:quickload (append (asdf:system-depends-on (asdf:find-system "rf-comments")) (list "fiveam" "cl-cookie")))'
+      --eval '(ql:quickload (append (asdf:system-depends-on (asdf:find-system "rf-comments")) (list "fiveam" "cl-cookie" "slynk")))'
 
 COPY src ./src
 COPY static ./static
