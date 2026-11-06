@@ -486,3 +486,80 @@ Returns (values body status headers-hash-table)."
         ;; URLs outside the site's origins are rejected.
         (is (= 422 (nth-value 1 (req :post (format nil "/admin/threads/~d/move" ta) :jar admin
                                      :params '(("key" . "x") ("url" . "https://evil.example.com/"))))))))))
+
+;;; ------------------------------------------------------------------
+;;; Counts API and admin stats
+
+(defun counts (query &key (origin :self))
+  (multiple-value-bind (body status headers)
+      (req :get (format nil "/api/counts?~a" query) :origin origin)
+    (values (and (= status 200) (com.inuoe.jzon:parse body)) status headers)))
+
+(test counts-api
+  (with-test-server ()
+    (let ((admin (admin-jar))
+          (alice (cl-cookie:make-cookie-jar))
+          (a "https://blog.example.com/a/")
+          (b "https://blog.example.com/b/"))
+      (make-blog-site admin)
+      ;; Two published comments on A, one pending on B, one published on id post-1.
+      (post-comment alice :page a :body "a1")
+      (req :post "/verify" :jar alice :params `(("token" . ,(last-email-token))))
+      (post-comment alice :page a :body "a2")
+      (post-comment nil :page b :name "Bob" :email "bob@example.com" :body "b1")
+      (req :post "/thread/comment" :jar alice
+                                   :params `(("site" . "blog") ("page" . ,a) ("id" . "post-1")
+                                             ("body" . "id comment")))
+      (multiple-value-bind (json status headers)
+          (counts (format nil "site=blog&page=~a&page=~a&page=~a&page=~a&id=post-1&id=nope"
+                          (quri:url-encode a)
+                          (quri:url-encode (concatenate 'string a "index.html?utm=x"))
+                          (quri:url-encode b)
+                          (quri:url-encode "https://evil.example.com/a/"))
+                  :origin "https://blog.example.com")
+        (is (= 200 status))
+        (is (= 2 (gethash a json)))
+        ;; Keys come back exactly as sent, even when they canonicalise.
+        (is (= 2 (gethash (concatenate 'string a "index.html?utm=x") json)))
+        (is (= 0 (gethash b json)))          ; only a pending comment
+        (is (= 0 (gethash "https://evil.example.com/a/" json)))
+        (is (= 1 (gethash "post-1" json)))
+        (is (= 0 (gethash "nope" json)))
+        (is (string= "https://blog.example.com" (gethash "access-control-allow-origin" headers)))
+        (is (has "max-age=60" (gethash "cache-control" headers))))
+      ;; No CORS for foreign origins.
+      (is (null (gethash "access-control-allow-origin"
+                         (nth-value 2 (counts "site=blog&id=post-1"
+                                              :origin "https://evil.example.com")))))
+      ;; Caps and errors.
+      (is (= 400 (nth-value 1 (counts (format nil "site=blog~{&id=k~d~}"
+                                              (loop for i below 101 collect i))))))
+      (is (= 404 (nth-value 1 (counts "site=nope&id=x")))))))
+
+(test admin-stats
+  (with-test-server ()
+    (let ((admin (admin-jar))
+          (alice (cl-cookie:make-cookie-jar)))
+      (make-blog-site admin)
+      (post-comment alice :body "one")
+      (req :post "/verify" :jar alice :params `(("token" . ,(last-email-token))))
+      (post-comment alice :body "two")
+      (post-comment nil :name "Bob" :email "bob@example.com" :body "pending")
+      (let ((dash (req :get "/admin" :jar admin)))
+        (is (has "Stats" dash))
+        (is (has "Comments per day" dash))
+        (is (has (subseq (iso-time) 0 10) dash))
+        (is (has "width:100.0%" dash))
+        (is (has "Most-commented threads" dash))
+        (is (has " · blog · 2" dash)))
+      (let ((row (first (rf-comments::site-status-counts))))
+        (is (= 2 (getf row :published)))
+        (is (= 1 (getf row :pending)))
+        (is (= 0 (getf row :hidden)))))))
+
+(test count-js-is-served
+  (with-test-server ()
+    (multiple-value-bind (body status headers) (req :get "/count.js")
+      (is (= 200 status))
+      (is (has "javascript" (gethash "content-type" headers)))
+      (is (has "/api/counts?" body)))))

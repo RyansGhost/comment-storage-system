@@ -384,6 +384,48 @@ thread is deleted. Returns the surviving thread's id."
             thread-id)))))
 
 ;;; ------------------------------------------------------------------
+;;; Aggregates, pushed down to SQLite ("Lisp for the Web" ch. 5 does this
+;;; with MapReduce in MongoDB; here it's GROUP BY)
+
+(defun thread-counts (site-id keys)
+  "Published comment counts for the threads with page KEYS on SITE-ID, as a
+hash table key → count. Keys without a thread are absent."
+  (let ((counts (make-hash-table :test #'equal)))
+    (when keys
+      (dolist (row (apply #'query
+                          (format nil "SELECT t.page_key, count(c.id) AS n
+                                       FROM threads t
+                                       LEFT JOIN comments c
+                                         ON c.thread_id = t.id AND c.status = 'published'
+                                       WHERE t.site_id = ? AND t.page_key IN (~{~*?~^, ~})
+                                       GROUP BY t.id" keys)
+                          site-id keys))
+        (setf (gethash (getf row :page-key) counts) (getf row :n))))
+    counts))
+
+(defun site-status-counts ()
+  "Per site: comment counts by status."
+  (query "SELECT s.id, s.key,
+                 sum(c.status = 'published') AS published,
+                 sum(c.status = 'pending') AS pending,
+                 sum(c.status = 'hidden') AS hidden
+          FROM sites s LEFT JOIN comments c ON c.site_id = s.id
+          GROUP BY s.id ORDER BY s.key"))
+
+(defun comments-per-day (&optional (days 30))
+  "(day count) rows for comments created in the last DAYS days."
+  (query "SELECT substr(created_at, 1, 10) AS day, count(*) AS n
+          FROM comments WHERE created_at >= ?
+          GROUP BY day ORDER BY day"
+         (subseq (iso-in (* -1 days 24 60 60)) 0 10)))
+
+(defun top-threads (&optional (limit 10))
+  (query (format nil "SELECT t.url, t.title, s.key AS site_key, count(c.id) AS n
+                      FROM threads t JOIN sites s ON s.id = t.site_id
+                      JOIN comments c ON c.thread_id = t.id AND c.status = 'published'
+                      GROUP BY t.id ORDER BY n DESC, t.id LIMIT ~d" limit)))
+
+;;; ------------------------------------------------------------------
 ;;; Email tokens (single use, hashed at rest)
 
 (defun issue-token (user-id purpose &key comment-id (ttl *token-ttl*))

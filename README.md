@@ -71,6 +71,24 @@ or merged from the admin.
 For Hugo, a partial such as `layouts/partials/comments.html` holding the
 snippet with `data-page-url="{{ .Permalink }}"` works well.
 
+### Comment counts on index pages
+
+To show "3 comments" next to each post on a list page, mark the spots and
+include `count.js` once:
+
+```html
+<a href="/posts/hello/" data-rf-count></a>          <!-- counts the link's href -->
+<span data-rf-count="post-42"></span>                <!-- a data-page-id -->
+<script src="https://comments.ryanfleck.ca/count.js" data-site="blog" async></script>
+```
+
+An empty `data-rf-count` uses the element's `href`. A value starting with
+`http(s):` is a page URL; anything else is a page id. One request fetches
+every count on the page:
+`GET /api/counts?site=blog&page=<url>&id=<page-id>…`, up to 100 keys,
+cached for 60 s. The response is JSON keyed exactly as sent, with CORS for
+the site's origins.
+
 For static-site builds there is also a read-only JSON endpoint:
 `GET /api/comments?site=blog&page=<url>`. It sends CORS headers for the
 site's own origins.
@@ -189,6 +207,9 @@ Tunables (limits, token lifetimes) are special variables at the top of
   appear on the edit page.
 - **Moderation:** recent comments, filterable by status, with publish, hide,
   and delete actions.
+- **Stats:** published, pending and hidden counts per site; comments per day
+  over the last 30 days; and the most-commented threads. All are computed
+  by SQLite `GROUP BY`, with no JavaScript in the admin.
 - **Threads:** each site's page lists its threads (key, current URL,
   comment count). A *Move* form changes a thread's key and/or URL, for
   example to adopt a `data-page-id` after the fact. Moving onto a key another
@@ -423,6 +444,7 @@ src/
   main.lisp            start/stop, executable entry point, healthcheck
 static/embed.js        the loader script sites include
 static/thread.js       iframe height reporting (postMessage)
+static/count.js        fills in "N comments" on index pages
 tests/                 FiveAM suites (unit, sigv4, integration)
 dev/start.lisp         REPL bootstrap for development
 build.lisp             builds bin/rf-comments (save-lisp-and-die)

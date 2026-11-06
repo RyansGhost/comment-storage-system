@@ -239,3 +239,17 @@ with `page_key` unique per site, and `comments.thread_id`. Each existing
 - Admin `POST /admin/threads/:id/move` re-keys or re-points a thread, merging
   into an existing thread with the same key.
 
+### Counts and stats (book ch. 5: push aggregation to the database)
+
+The book runs MapReduce inside MongoDB rather than fetching every document.
+Here the same idea is a single SQL `GROUP BY` per question (see
+"Aggregates" in `src/db.lisp`):
+
+- `GET /api/counts`: published counts for up to 100 thread keys (page
+  URLs, canonicalised and checked against the site's origins, or page ids).
+  Keys come back exactly as sent; unknown or foreign keys get 0. It has CORS
+  for the site's origins and `Cache-Control: max-age=60`. `static/count.js`
+  batches every `[data-rf-count]` element on a page into one request.
+- Admin stats: status counts per site, comments per day for 30 days (CSS
+  bars, CSP-safe), and the top 10 threads.
+
