@@ -17,6 +17,27 @@
 ;;;;
 ;;;; COMMENT arguments are rows from COMMENT-BY-ID (plists). BY is who
 ;;;; acted: :AUTHOR (the commenter) or :ADMIN.
+;;;;
+;;;; ----------------------------------------------------------------------
+;;;; CLOS refresher: generic functions and the standard method combination
+;;;; ----------------------------------------------------------------------
+;;;; In CLOS, methods belong to *generic functions*, not to classes. Calling
+;;;; a generic function selects the *applicable* methods by the classes (or
+;;;; EQL values) of all its arguments, then combines them. In the standard
+;;;; method combination that means:
+;;;;   :AROUND methods (outermost; each may CALL-NEXT-METHOD)
+;;;;   → all :BEFORE methods, most specific first
+;;;;   → the most specific *primary* method (its value is the call's value)
+;;;;   → all :AFTER methods, most specific *last*
+;;;; An unspecialised parameter, like COMMENT here, is specialised on T,
+;;;; which matches anything, so plists work without defining classes.
+;;;;
+;;;; Why not a hooks list, or an explicit "notify" call inside each
+;;;; operation? With CLOS the extension point is part of the language: the
+;;;; caller just calls (publish-comment c :author), and anyone can add
+;;;; behaviour by defining a method, including at the live REPL (see
+;;;; repl.lisp). Removing a behaviour is (remove-method …). This is the
+;;;; book's "Observer pattern in one line" point.
 
 (in-package #:rf-comments)
 
@@ -24,6 +45,30 @@
   (format *error-output* "~&;; observer of ~(~a~) failed: ~a~%"
           (sb-mop:generic-function-name generic-function) condition))
 
+;;; DEFINE-METHOD-COMBINATION, long form. This is the most advanced CLOS
+;;; feature in the project, so here it is step by step:
+;;;
+;;;  * The method-group specifiers (around (:around)) … sort the applicable
+;;;    methods into lists by their qualifiers. PRIMARY has no qualifier and
+;;;    is :REQUIRED (calling with no applicable primary method is an error).
+;;;    Each list is ordered most specific first.
+;;;  * (:generic-function gf) binds GF to the generic function object, so the
+;;;    effective method can name it in the log message.
+;;;  * The body returns a *form*: the "effective method" CLOS compiles and
+;;;    runs for this combination of methods. Inside it:
+;;;      (call-method M NEXT-METHODS)  runs method M; NEXT-METHODS is what
+;;;                                    CALL-NEXT-METHOD inside M will call
+;;;      (make-method FORM)            wraps an arbitrary form as a method,
+;;;                                    used to make "everything inside the
+;;;                                    :AROUNDs" the next method of the
+;;;                                    outermost :AROUND
+;;;  * Our only change from the standard combination (compare CLHS
+;;;    DEFINE-METHOD-COMBINATION's example) is the HANDLER-CASE around each
+;;;    :AFTER method. :AFTER runs most-specific-last, hence (reverse after).
+;;;    MULTIPLE-VALUE-PROG1 keeps the primary method's return values.
+;;;
+;;; Errors in :BEFORE or primary methods still propagate, as they should:
+;;; if the database update fails, the request must fail too.
 (define-method-combination observed ()
   ((around (:around))
    (before (:before))
@@ -43,6 +88,11 @@
 
 ;;; ------------------------------------------------------------------
 ;;; Operations (primary methods: state changes only)
+;;;
+;;; DEFGENERIC declares the generic function and its lambda list once, and
+;;; :METHOD-COMBINATION OBSERVED opts into the combination above. (Plain
+;;; DEFMETHOD with no DEFGENERIC would create a generic function implicitly,
+;;; but with the standard combination.)
 
 (defgeneric publish-comment (comment by)
   (:method-combination observed)
@@ -70,6 +120,11 @@
 
 ;;; ------------------------------------------------------------------
 ;;; Observer: moderation / audit log (every operation, every actor)
+;;;
+;;; Note that we can't define two :AFTER methods with the same qualifiers and
+;;; specializers on one generic function; the second would simply *replace*
+;;; the first. So the log takes the general (comment by) slot, and the
+;;; notification below specialises BY with EQL to get a distinct slot.
 
 (defun comment-summary (comment)
   (format nil "~a on ~a: ~a"
@@ -114,5 +169,9 @@
                 :outro (format nil "Comment #~d on site ~a." (getf comment :id)
                                (getf comment :site-key)))))
 
+;;; (by (eql :author)) is an *EQL specializer*: this method is applicable
+;;; only when BY is the keyword :AUTHOR. That replaces an explicit
+;;; (when (eq by :author) …) test, and makes "admin actions don't notify"
+;;; a fact of dispatch.
 (defmethod publish-comment :after (comment (by (eql :author)))
   (notify-admin-of-comment comment))

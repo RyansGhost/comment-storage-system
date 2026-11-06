@@ -4,12 +4,46 @@
 ;;;; request on its own thread, and a personal comment box never needs
 ;;;; more than one writer. Rows come back as plists with keyword keys,
 ;;;; e.g. (:id 1 :email "a@b.c" ...).
+;;;;
+;;;; ----------------------------------------------------------------------
+;;;; Why these choices
+;;;; ----------------------------------------------------------------------
+;;;; * SQLite: a single file, no server process, trivially backed up, and
+;;;;   plenty fast for a comment box. It's the right size for "tiny".
+;;;; * cl-sqlite (package SQLITE): a thin binding over the C library, via
+;;;;   CFFI (CL's foreign-function interface). It gives prepared statements
+;;;;   and little else. We write plain SQL, as the book's Endgame chapter
+;;;;   recommends ("stay close to the SQL"), instead of using an ORM such as
+;;;;   Mito. Every query you need to reason about is visible in this file.
+;;;; * Parameters are always bound with `?` placeholders, never formatted
+;;;;   into the SQL string. Binding sends values separately from the SQL
+;;;;   text, which is what makes SQL injection impossible. (The few FORMATs
+;;;;   below only splice in integers we computed or lists of `?`.)
+;;;; * Plists as rows: (getf row :display-name) reads nicely, prints readably
+;;;;   in the REPL, and needs no class definitions. Column names map
+;;;;   display_name → :DISPLAY-NAME (see COLUMN-KEYWORD).
+;;;;
+;;;; Data model at a glance (see *MIGRATIONS* for the full schema):
+;;;;   sites ─┬─< threads ─< comments >─ users
+;;;;          └──────────────< comments
+;;;;   users ─< tokens (email links)    users ─< sessions (cookies)
+;;;;   moderation_log, settings, schema_migrations
 
 (in-package #:rf-comments)
 
+;;; Why one connection plus a lock rather than a connection pool: SQLite
+;;; allows only one writer at a time anyway, and a comment box handles a
+;;; handful of requests per second at most. The lock is *recursive* because
+;;; functions nest: FIND-OR-CREATE-USER holds it for a transaction, then
+;;; calls USER-BY-ID, which takes it again on the same thread. A
+;;; non-recursive lock would deadlock there.
 (defvar *db* nil "The open SQLITE:SQLITE-HANDLE.")
 (defvar *db-lock* (bt:make-recursive-lock "rf-comments db"))
 
+;;; WITH-DB / WITH-TRANSACTION are the usual WITH- macro pattern: set
+;;; something up, run BODY, clean up even on non-local exit. The empty ()
+;;; is a placeholder for future options; it keeps the conventional
+;;; (with-foo (options) body) shape.
 (defmacro with-db (() &body body)
   "Run BODY holding the database lock."
   `(bt:with-recursive-lock-held (*db-lock*)
@@ -22,6 +56,16 @@
 (defun column-keyword (name)
   (intern (string-upcase (substitute #\- #\_ name)) :keyword))
 
+;;; The cl-sqlite prepared-statement lifecycle, done by hand so we can read
+;;; column names and build plists:
+;;;   PREPARE-STATEMENT    compile the SQL
+;;;   BIND-PARAMETER       fill the Nth `?` (1-based!); integers, strings,
+;;;                        floats, octet vectors, and NIL → SQL NULL
+;;;   STEP-STATEMENT       advance to the next row; NIL when done
+;;;   STATEMENT-COLUMN-VALUE   read column I of the current row (0-based!)
+;;;   FINALIZE-STATEMENT   free it. In UNWIND-PROTECT so an error mid-query
+;;;                        can't leak the statement.
+;;; T is bound as 1 because SQLite has no boolean type.
 (defun query (sql &rest params)
   "Run SQL with positional PARAMS (?) and return all rows as plists."
   (with-db ()
@@ -40,6 +84,11 @@
 (defun query-one (sql &rest params)
   (first (apply #'query sql params)))
 
+;;; For INSERT/UPDATE/DELETE. Returns two values: the new row's id (so
+;;; callers can write (let ((id (exec "INSERT …"))) …)) and how many rows
+;;; changed. SQLite's changes() function reports the latter, and is safe to
+;;; call here because we hold the lock, so no other statement can run in
+;;; between.
 (defun exec (sql &rest params)
   "Run a statement. Returns (values last-insert-rowid changes)."
   (with-db ()
@@ -50,6 +99,13 @@
 
 ;;; ------------------------------------------------------------------
 ;;; Migrations: append new entries; never edit an applied one.
+;;;
+;;; Each entry is (VERSION SQL...). MIGRATE runs, in order, every version not
+;;; yet recorded in schema_migrations, each inside a transaction (SQLite has
+;;; transactional DDL, so a failing migration leaves no half-built schema).
+;;; Running at every startup makes upgrades automatic: deploy new code and
+;;; the database catches up. Data migrations are plain SQL too; see 3
+;;; (backfilling threads from comments) and 4 (random avatar keys).
 
 (defparameter *migrations*
   '((1
@@ -149,6 +205,16 @@
                 version (iso-time)))
         (format t "~&;; applied migration ~d~%" version)))))
 
+;;; PRAGMAs, per connection:
+;;;   busy_timeout 5000  wait up to 5 s for a lock instead of failing
+;;;                      immediately (e.g. while `sqlite3 .backup` runs)
+;;;   journal_mode WAL   readers don't block the writer; this is also why
+;;;                      Docker mounts the *directory* (WAL needs the -wal and
+;;;                      -shm side files)
+;;;   foreign_keys ON    SQLite ignores REFERENCES/ON DELETE CASCADE unless
+;;;                      this is enabled, for backwards compatibility
+;;;   synchronous NORMAL the recommended durability level with WAL
+;;; ":memory:" opens a throwaway in-memory database (used by the unit tests).
 (defun db-open (&optional (path *db-path*))
   "Open (creating if needed) the database at PATH and run migrations."
   (bt:with-recursive-lock-held (*db-lock*)
@@ -173,6 +239,13 @@
 
 ;;; ------------------------------------------------------------------
 ;;; Settings
+;;;
+;;; A tiny key/value table for values generated once per installation, like
+;;; the salt used to hash IP addresses.
+;;;
+;;; (defun (setf setting) …) defines a *setf function*, so
+;;; (setf (setting "k") v) works like any other place, including returning
+;;; the stored value as SETF conventionally does.
 
 (defun setting (key)
   (getf (query-one "SELECT value FROM settings WHERE key = ?" key) :value))
@@ -186,6 +259,11 @@
   (or (setting "ip_salt")
       (setf (setting "ip_salt") (random-token 16))))
 
+;;; We keep a keyed hash of the poster's IP, not the IP itself. It's enough
+;;; to spot one spammer posting under many names, without storing personal
+;;; data in plain form. A plain SHA-256 of an IPv4 address would be
+;;; trivially reversible (there are only 2^32 of them), hence an HMAC with a
+;;; secret per-install salt.
 (defun hash-ip (ip)
   (when ip
     (subseq (ironclad:byte-array-to-hex-string (hmac-sha256 (ip-salt) ip)) 0 16)))
@@ -205,6 +283,11 @@
     ("custom_css" . "Custom CSS"))
   "Configurable theme properties, in the order the admin form shows them.")
 
+;;; Sites store two non-scalar fields as text: origins (one per line) and the
+;;; theme (a JSON object). DECODE-SITE turns them into Lisp data: a list of
+;;; origin strings, and a hash table of theme key → value (jzon parses JSON
+;;; objects into EQUAL hash tables). IGNORE-ERRORS guards against a
+;;; hand-edited, malformed theme column.
 (defun decode-site (row)
   (when row
     (let ((theme (ignore-errors (jzon:parse (getf row :theme)))))
@@ -257,6 +340,11 @@
 
 ;;; ------------------------------------------------------------------
 ;;; Users
+;;;
+;;; A user is just an email address plus a display name. There are no
+;;; passwords: proving you own the address (clicking an emailed link) is
+;;; the only authentication, which suits a low-stakes comment system and
+;;; leaves us no password database to protect.
 
 (defun user-by-id (id) (query-one "SELECT * FROM users WHERE id = ?" id))
 (defun user-by-email (email) (query-one "SELECT * FROM users WHERE email = ?" email))
@@ -288,6 +376,12 @@ an already verified user is never changed by an anonymous submission."
 
 ;;; ------------------------------------------------------------------
 ;;; Comments
+;;;
+;;; Status lifecycle: pending ─(verify link / signed in)→ published
+;;;                   published ⇄ hidden (admin moderation).
+;;; Changing status should go through the generic functions in events.lisp
+;;; (PUBLISH-COMMENT, …), which add logging and notifications. The
+;;; functions here are the raw database operations those build on.
 
 (defun create-comment (&key site-id thread-id user-id page-url (page-title "") body
                          (status "pending") ip-hash)
@@ -326,6 +420,9 @@ an already verified user is never changed by an anonymous submission."
           LEFT JOIN threads t ON t.id = c.thread_id
           WHERE c.user_id = ? ORDER BY c.created_at DESC, c.id DESC" user-id))
 
+;;; FORMAT builds two variants of one query: ~:[A~;B~] prints A if its
+;;; argument is NIL, else B. Only that fixed SQL text and the integer LIMIT
+;;; are spliced in; the status itself is still a bound `?` parameter.
 (defun recent-comments (&key status (limit 100))
   (apply #'query
          (format nil "SELECT c.*, u.display_name, u.email, u.verified_at, s.key AS site_key,
@@ -349,6 +446,10 @@ an already verified user is never changed by an anonymous submission."
 
 ;;; ------------------------------------------------------------------
 ;;; Threads
+;;;
+;;; A thread is "the comments for one page". Its PAGE_KEY is either the
+;;; embed's data-page-id or the canonical page URL. See DESIGN.md, "Stable
+;;; thread ids", for why URLs alone make poor keys.
 
 (defun thread-by-key (site-id page-key)
   (query-one "SELECT * FROM threads WHERE site_id = ? AND page_key = ?" site-id page-key))
@@ -397,6 +498,8 @@ thread is deleted. Returns the surviving thread's id."
 ;;; Aggregates, pushed down to SQLite ("Lisp for the Web" ch. 5 does this
 ;;; with MapReduce in MongoDB; here it's GROUP BY)
 
+;;; ~{~*?~^, ~} prints one "?" per element of KEYS (~* skips the element
+;;; itself), producing "IN (?, ?, ?)" with the keys bound as parameters.
 (defun thread-counts (site-id keys)
   "Published comment counts for the threads with page KEYS on SITE-ID, as a
 hash table key → count. Keys without a thread are absent."
@@ -437,6 +540,15 @@ hash table key → count. Keys without a thread are absent."
 
 ;;; ------------------------------------------------------------------
 ;;; Email tokens (single use, hashed at rest)
+;;;
+;;; The raw token goes into the emailed link; only its SHA-256 is stored.
+;;; Someone holding a copy of the database (a backup, say) therefore can't
+;;; use it to publish comments or sign in as anyone. Lookups hash the
+;;; incoming token and compare hashes. A fast hash is fine here (unlike for
+;;; passwords) because the tokens are 256 random bits, not guessable words.
+;;;
+;;; PEEK-TOKEN vs CONSUME-TOKEN: GET requests only peek (render a
+;;; confirmation page); the POST that follows consumes. See web.lisp for why.
 
 (defun issue-token (user-id purpose &key comment-id (ttl *token-ttl*))
   (let ((raw (random-token)))
@@ -467,6 +579,12 @@ hash table key → count. Keys without a thread are absent."
 
 ;;; ------------------------------------------------------------------
 ;;; Sessions (hashed at rest)
+;;;
+;;; Server-side sessions: the cookie holds a random token, the table holds
+;;; its hash plus who it belongs to. We don't use Hunchentoot's built-in
+;;; sessions, which live in memory and so vanish on every restart or deploy.
+;;; Deleting a row logs that browser out immediately, which signed
+;;; stateless tokens such as JWTs can't do.
 
 (defun create-session (kind &key user-id (ttl *session-ttl*))
   (let ((raw (random-token)))

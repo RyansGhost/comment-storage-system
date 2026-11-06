@@ -17,6 +17,11 @@
 (defvar *avatar-ttl* (* 24 60 60) "Seconds a fetched image is reused.")
 (defvar *avatar-cache-limit* 2000 "Cached images before the cache is emptied.")
 
+;;; Dependency injection, Lisp style: the fetcher is a special variable
+;;; holding a function designator (here the symbol FETCH-GRAVATAR, which
+;;; FUNCALL resolves to the function at call time, so redefining
+;;; FETCH-GRAVATAR at the REPL takes effect immediately). Tests SETF it to a
+;;; lambda, so they never touch the network.
 (defvar *avatar-fetcher* 'fetch-gravatar
   "Function of a URL returning (values octets content-type). Tests replace it.")
 (defvar *avatar-cache* (make-hash-table :test #'equal)
@@ -32,6 +37,11 @@
           (sha256-hex (string-downcase (trim email)))
           (query-string "s" *avatar-size* "d" *avatar-default* "r" "g")))
 
+;;; Dexador returns (values body status headers …). :FORCE-BINARY T asks
+;;; for the body as an octet vector even when the Content-Type looks
+;;; textual. The response headers come back as a hash table keyed by
+;;; lowercase header name. Tight timeouts keep a slow Gravatar from tying up
+;;; request threads.
 (defun fetch-gravatar (url)
   (multiple-value-bind (body status headers)
       (dex:get url :force-binary t :connect-timeout 3 :read-timeout 5 :keep-alive nil)
@@ -63,6 +73,12 @@ carry script."
 (defun reset-avatar-cache ()
   (bt:with-lock-held (*avatar-lock*) (clrhash *avatar-cache*)))
 
+;;; The cache is a plain EQUAL hash table guarded by a lock (Hunchentoot
+;;; serves requests concurrently). The fetch happens *outside* the lock so a
+;;; slow request doesn't block every other avatar. Two simultaneous misses
+;;; may both fetch the same image, which is harmless. "Emptying when full"
+;;; is the simplest bounded cache: crude next to an LRU, but at this scale a
+;;; refill costs a few Gravatar requests.
 (defun avatar-image (user)
   "Image for USER as (values data content-type long-lived-p). Serves the cached
 copy while fresh; refetches after *AVATAR-TTL*; falls back to a stale copy,

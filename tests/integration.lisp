@@ -2,6 +2,16 @@
 ;;;;
 ;;;; A server is started on a random local port against a temporary
 ;;;; database, with emails captured in memory instead of sent.
+;;;;
+;;;; These tests talk to the server exactly as a browser would: over HTTP,
+;;;; with Dexador as the client, a cookie jar per simulated person (alice,
+;;;; bob, admin…), and an Origin header to pass the CSRF check. Asserting
+;;;; on status codes, headers and HTML substrings keeps them independent of
+;;;; implementation details, so internal refactors (like the route macros)
+;;;; don't break them.
+;;;;
+;;;; Emails are captured (EMAIL-BACKEND :capture), and the tests "click"
+;;;; links by pulling the token out of the captured email text.
 
 (in-package #:rf-comments/tests)
 
@@ -15,6 +25,11 @@
   (namestring (merge-pathnames (format nil "rf-comments-test-~a.db" (random-token 6))
                                (uiop:temporary-directory))))
 
+;;; Each test gets a fresh server on a random port and a fresh database file.
+;;; We build an APP-ACCEPTOR directly instead of calling RF-COMMENTS:START, so
+;;; a development server already running in the same REPL (on *ACCEPTOR*) is
+;;; left alone. Routes are global to easy-routes, so both acceptors serve
+;;; the same handlers.
 (defmacro with-test-server (() &body body)
   `(let* ((port (+ 20000 (random 20000 (make-random-state t))))
           (db (temp-db-path))
@@ -42,6 +57,14 @@
            (dolist (suffix '("" "-wal" "-shm"))
              (uiop:delete-file-if-exists (concatenate 'string db suffix))))))))
 
+;;; Dexador options worth knowing:
+;;;   :CONTENT alist      sent as an application/x-www-form-urlencoded form
+;;;   :COOKIE-JAR jar     stores Set-Cookie responses, replays them later
+;;;   :MAX-REDIRECTS 0    don't follow redirects: we want to *see* the 303
+;;;                       and its Location
+;;;   :PROXY NIL          ignore any HTTP(S)_PROXY in the environment
+;;; Dexador signals on 4xx/5xx. We catch that and return the same three
+;;; values, so a test can assert (= 403 status) like any other result.
 (defun req (method path &key jar params (origin :self) headers)
   "Make a request without following redirects.
 Returns (values body status headers-hash-table)."

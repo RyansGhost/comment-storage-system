@@ -2,6 +2,40 @@
 ;;;;
 ;;;; Spinneret escapes every string it prints, so user content is always
 ;;;; safe to interpolate. Only CSS we generate ourselves goes through :RAW.
+;;;;
+;;;; ----------------------------------------------------------------------
+;;;; Spinneret in five minutes
+;;;; ----------------------------------------------------------------------
+;;;; Spinneret turns s-expressions into HTML:
+;;;;
+;;;;   (spinneret:with-html-string
+;;;;     (:p.note :id "x" "Hello, " name))   →  <p class=note id=x>Hello, Bob
+;;;;
+;;;; * A list starting with a keyword is a tag. :tag.class#id is shorthand
+;;;;   for class and id attributes.
+;;;; * Keyword/value pairs right after the tag are attributes. A NIL value
+;;;;   omits the attribute, and T writes a boolean attribute (:required t).
+;;;; * Remaining forms are children: strings and other values are printed
+;;;;   *HTML-escaped*, so user input can't inject markup. That's the main
+;;;;   reason we chose Spinneret over CL-WHO (the book's library), where
+;;;;   escaping is opt-in (ESCAPE-STRING) and therefore easy to forget.
+;;;; * Ordinary Lisp works anywhere inside: (dolist …), (when …),
+;;;;   (if …). Tag forms inside them are still recognised, because
+;;;;   WITH-HTML walks the code at macroexpansion time.
+;;;; * (:raw string) inserts STRING unescaped. We use it only for CSS we
+;;;;   generated ourselves.
+;;;; * WITH-HTML-STRING returns the HTML as a string. WITH-HTML (no -STRING)
+;;;;   writes to the stream in SPINNERET:*HTML*, which is how helper
+;;;;   functions like COMMENT-BODY-HTML emit fragments into a page being
+;;;;   built by their caller: they print, rather than return, their markup.
+;;;; * Spinneret pretty-prints when *PRINT-PRETTY* is true. We bind it to NIL
+;;;;   for compact output (smaller pages, and no whitespace surprises in
+;;;;   inline layouts).
+;;;;
+;;;; CSS lives in Lisp strings rather than separate files so the saved
+;;;; executable is self-contained (no static directory to ship) and pages
+;;;; render in one request. Themes are CSS custom properties (--rf-accent
+;;;; …) that each site's theme overrides.
 
 (in-package #:rf-comments)
 
@@ -92,6 +126,11 @@ table.bars td{border:0;padding:.1em .4em;white-space:nowrap}
   "Strip characters that could escape a CSS declaration."
   (and value (remove-if (lambda (c) (find c ";{}<>\\\"'`")) (substitute #\Space #\Newline value))))
 
+;;; Theme values come from the admin form and are interpolated into a
+;;; <style> element as raw text, so they're sanitised: SAFE-CSS-VALUE (above)
+;;; strips characters that could end a declaration or a rule, and custom CSS
+;;; has every "</" escaped so it can never close the <style> tag and start
+;;; HTML (<\/style> is still valid CSS text but not an end tag).
 (defun theme-value (site key)
   (let ((v (gethash key (getf site :theme))))
     (unless (blank-p v) v)))
@@ -120,6 +159,13 @@ table.bars td{border:0;padding:.1em .4em;white-space:nowrap}
 ;;; ------------------------------------------------------------------
 ;;; Layout
 
+;;; Why a macro rather than a function taking a body string? BODY is
+;;; Spinneret code that must be expanded *inside* WITH-HTML-STRING to print
+;;; into the same output, which only a macro can arrange. This is exactly
+;;; the book's STANDARD-PAGE macro (ch. 2): the boilerplate lives in one
+;;; place, and every page expands into a complete document.
+;;; ,@(when extra-css …) splices in a third <style> only when given:
+;;; WHEN returns NIL otherwise, and splicing NIL adds nothing.
 (defmacro html-page ((&key title (css '*page-css*) extra-css body-class) &body body)
   "Render a complete HTML document and return it as a string."
   `(let ((*print-pretty* nil))
@@ -136,6 +182,11 @@ table.bars td{border:0;padding:.1em .4em;white-space:nowrap}
          ,@(when extra-css `((:style (:raw ,extra-css)))))
         (:body :class ,body-class ,@body)))))
 
+;;; Comments are plain text. Blank lines become paragraphs, single newlines
+;;; become <br>. Every LINE is printed by Spinneret, therefore escaped:
+;;; "<script>" shows up literally. (The :span wrapper exists because a bare
+;;; variable inside LOOP's DO clause is evaluated but not printed; only tag
+;;; forms and direct children of tags emit output.)
 (defun comment-body-html (body)
   (spinneret:with-html
     (:div.rf-body
@@ -155,6 +206,10 @@ table.bars td{border:0;padding:.1em .4em;white-space:nowrap}
      (notice-html message kind)
      (when link (:p (:a :href link (or link-text "Continue")))))))
 
+;;; After a POST we redirect with ?notice=check-email, and the page looks the
+;;; message up here. Using fixed keys instead of putting the message itself
+;;; in the URL means nobody can craft a link that makes our page display
+;;; arbitrary text (a phishing/"content injection" trick).
 (defparameter *notices*
   '(("check-email" . "Thanks! We've emailed you a link — your comment appears once you confirm your address.")
     ("posted" . "Your comment has been posted.")

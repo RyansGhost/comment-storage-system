@@ -3,6 +3,12 @@
 ;;;; Python implementation) for the same inputs.
 
 (in-package #:rf-comments/tests)
+;;;
+;;; Known-answer tests are the right tool for crypto code: an implementation
+;;; that's "almost right" produces a completely different signature, so a
+;;; single matching vector proves every step (canonicalisation, hashing,
+;;; key derivation) is exactly right. The botocore values were produced by
+;;; running botocore's SigV4Auth with a frozen clock on the same inputs.
 
 (def-suite sigv4 :in all)
 (in-suite sigv4)

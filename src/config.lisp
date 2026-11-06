@@ -2,6 +2,31 @@
 ;;;;
 ;;;; Every setting is a special variable so it can be inspected or rebound
 ;;;; from the REPL (and in tests) without touching the environment.
+;;;;
+;;;; ----------------------------------------------------------------------
+;;;; Special variables, DEFVAR vs DEFPARAMETER, and threads
+;;;; ----------------------------------------------------------------------
+;;;; A variable defined with DEFVAR or DEFPARAMETER is *special* (dynamically
+;;;; scoped). By convention its name wears *earmuffs*. Two things to know:
+;;;;
+;;;; 1. DEFVAR only assigns if the variable is unbound, while DEFPARAMETER
+;;;;    always assigns. That's why settings use DEFVAR. When you reload this
+;;;;    file in a live REPL (C-c C-k in SLY), values you've already set,
+;;;;    e.g. (setf *admin-password* "admin") in dev/start.lisp, survive the
+;;;;    reload. Constant-like tables elsewhere use DEFPARAMETER so edits to
+;;;;    them do take effect on reload.
+;;;;
+;;;; 2. (let ((*port* 9000)) …) rebinds a special variable for the dynamic
+;;;;    extent of that LET, but only in the current thread. Hunchentoot
+;;;;    handles each request in a new thread, which sees the *global* value.
+;;;;    So a server-wide setting must be changed with SETF, not LET. The
+;;;;    tests' WITH-GLOBALS macro (tests/package.lisp) exists because of
+;;;;    this.
+;;;;
+;;;; Why environment variables: the service runs in Docker, where env vars
+;;;; (from docker-compose's env_file) are the standard way to configure a
+;;;; container. LOAD-CONFIG is called once at startup by MAIN. In the REPL
+;;;; you simply SETF the variables instead.
 
 (in-package #:rf-comments)
 
@@ -32,7 +57,8 @@ monsterid, wavatar, retro, robohash or blank.")
   "When true, the client IP is taken from the last X-Forwarded-For entry.")
 (defvar *cookie-secure* nil "Mark cookies Secure (on automatically for https).")
 
-;;; Tunables
+;;; Tunables. Not read from the environment; change them here or SETF them
+;;; from a REPL. Durations are in seconds.
 (defvar *max-body-length* 5000)
 (defvar *max-name-length* 60)
 (defvar *token-ttl* (* 48 60 60) "Email link lifetime, seconds.")
@@ -42,6 +68,10 @@ monsterid, wavatar, retro, robohash or blank.")
 (defvar *comments-per-window* 10 "Max comments per IP per *RATE-WINDOW*.")
 (defvar *rate-window* (* 10 60))
 
+;;; UIOP:GETENV is the portable way to read an environment variable (the
+;;; standard has no such function). Treating "" like unset means
+;;; `FOO=` in an .env file falls back to the default instead of producing an
+;;; empty setting.
 (defun env (name &optional default)
   (let ((value (uiop:getenv name)))
     (if (and value (plusp (length value))) value default)))
@@ -55,6 +85,14 @@ monsterid, wavatar, retro, robohash or blank.")
 (defun strip-trailing-slash (s)
   (string-right-trim "/" s))
 
+;;; Each variable's current value doubles as its default. A REPL user who
+;;; set something before calling LOAD-CONFIG keeps it unless the
+;;; environment overrides it.
+;;;
+;;; (intern (string-upcase "ses") :keyword) turns the string "ses" into the
+;;; keyword :SES, so the rest of the code can use EQ / ECASE on keywords
+;;; instead of comparing strings everywhere. The validation at the end then
+;;; fails fast at startup, rather than on the first email or request.
 (defun load-config ()
   "Populate the configuration variables from the environment."
   (setf *public-url* (strip-trailing-slash (env "PUBLIC_URL" *public-url*))

@@ -447,6 +447,20 @@ The suite has 177 checks:
 ---
 
 ## Project layout
+## Project layout
+
+**Reading the code.** Every Lisp file opens with a comment block explaining
+what it does and why it's built that way, written for someone who knows Lisp
+but not Common Lisp web development. Read them in load order (the
+`:components` list in `rf-comments.asd`):
+
+- `package`, `config`, `util`, `db`, `email`: foundations
+- `events`, `avatars`, `views`, `routes`: CLOS observers, Spinneret, and
+  Hunchentoot/easy-routes
+- `web`, `admin`: the actual pages
+- `repl`, `main`, `build.lisp`: running it
+
+`tests/package.lisp` has a FiveAM primer.
 
 ```
 rf-comments.asd        ASDF systems: rf-comments and rf-comments/tests

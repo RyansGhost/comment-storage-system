@@ -1,4 +1,14 @@
 ;;;; util.lisp — time, tokens, hashing, URL and input validation.
+;;;;
+;;;; Small, pure-ish helpers with no knowledge of HTTP or the database. They
+;;;; are easy to try at the REPL, e.g. (canonical-page-url "https://X.com/a/index.html?q").
+;;;;
+;;;; A Common Lisp idiom used throughout: functions that can fail return
+;;;; MULTIPLE VALUES, (values nil "why it failed"), instead of signalling an
+;;;; error. A caller that only wants the result just uses the first value
+;;;; (extra values are silently dropped). A caller that wants the message
+;;;; uses MULTIPLE-VALUE-BIND, or the WITH-VALID-INPUTS macro from
+;;;; routes.lisp.
 
 (in-package #:rf-comments)
 
@@ -6,6 +16,11 @@
 ;;; Time — all timestamps are UTC ISO-8601 strings: "2026-11-06T15:41:00Z"
 ;;; They are readable in sqlite3 and sort correctly as text.
 
+;;; Common Lisp's clock is the *universal time*: seconds since 1900-01-01
+;;; UTC (GET-UNIVERSAL-TIME). DECODE-UNIVERSAL-TIME splits it into
+;;; components. Passing time zone 0 gives UTC regardless of the server's
+;;; locale. In the FORMAT string, ~4,'0d prints an integer padded to 4
+;;; digits with zeros.
 (defun iso-time (&optional (universal-time (get-universal-time)))
   (multiple-value-bind (s mi h d mo y) (decode-universal-time universal-time 0)
     (format nil "~4,'0d-~2,'0d-~2,'0dT~2,'0d:~2,'0d:~2,'0dZ" y mo d h mi s)))
@@ -14,6 +29,9 @@
   "ISO time SECONDS from now (negative for the past)."
   (iso-time (+ (get-universal-time) seconds)))
 
+;;; HANDLER-CASE is CL's try/catch: if anything in the body signals an
+;;; ERROR, return the original string rather than failing the whole page
+;;; render over a malformed date.
 (defun human-date (iso)
   "2026-11-06T15:41:00Z → \"Nov 6, 2026\"."
   (handler-case
@@ -28,6 +46,10 @@
 
 ;;; ------------------------------------------------------------------
 ;;; Crypto helpers
+;;;
+;;; Ironclad works on octet vectors, (simple-array (unsigned-byte 8) (*)),
+;;; not strings, so strings go through BABEL to UTF-8 first. Never hash a
+;;; Lisp string's internal representation; always pick an encoding.
 
 (defun utf8 (string)
   (babel:string-to-octets string :encoding :utf-8))
@@ -43,10 +65,18 @@
     (ironclad:update-hmac mac (if (stringp data) (utf8 data) data))
     (ironclad:hmac-digest mac)))
 
+;;; IRONCLAD:RANDOM-DATA uses the operating system's cryptographic RNG
+;;; (/dev/urandom). Do NOT use CL:RANDOM for secrets: it's a predictable
+;;; PRNG meant for simulations. 32 bytes = 256 bits, hex encoded to 64 chars
+;;; so tokens are safe in URLs and cookies without further escaping.
 (defun random-token (&optional (bytes 32))
   "A URL-safe random token with BYTES bytes of entropy (hex encoded)."
   (ironclad:byte-array-to-hex-string (ironclad:random-data bytes)))
 
+;;; Used for the admin password. A plain STRING= returns as soon as a
+;;; character differs, so response time leaks how much of a guess was right.
+;;; Hashing both sides first gives equal-length inputs, and
+;;; CONSTANT-TIME-EQUAL always inspects every byte.
 (defun constant-time-string= (a b)
   "Compare two strings without leaking where they differ."
   (and (stringp a) (stringp b)
@@ -78,7 +108,19 @@
 ;;; ------------------------------------------------------------------
 ;;; Input validation. Each CLEAN-* function returns the cleaned value, or
 ;;; (values NIL "error message").
+;;;
+;;; Validation is deliberately done on the server, even though the HTML
+;;; form also has `required`/`maxlength` attributes: browsers can be
+;;; bypassed with curl, so the server never trusts what it receives.
 
+;;; CL-PPCRE:CREATE-SCANNER compiles a regex once, at load time, into a
+;;; closure. Passing the scanner (instead of the pattern string) to SCAN
+;;; skips recompiling on every call. (With a literal string pattern,
+;;; cl-ppcre also caches compiled patterns via compiler macros, so the
+;;; inline patterns below are fine too.)
+;;; The pattern is intentionally loose: real validation of an email address
+;;; is "can it receive our verification email?", which is exactly what the
+;;; verify-link flow tests.
 (defparameter +email-scanner+
   (cl-ppcre:create-scanner "^[^@\\s<>\"']+@[^@\\s<>\"']+\\.[^@\\s<>\"'.]+$"))
 
@@ -122,6 +164,13 @@
 
 ;;; ------------------------------------------------------------------
 ;;; URLs
+;;;
+;;; QURI parses URLs into objects with readers (uri-scheme, uri-host,
+;;; uri-port, uri-path…). We reduce URLs to two derived forms:
+;;;   origin             scheme://host[:port]: the unit browsers use for
+;;;                      security (CORS, CSP frame-ancestors, Origin header)
+;;;   canonical page URL origin + path: the identity of a comment thread
+;;;                      when the embed gives no data-page-id
 
 (defun default-port-p (scheme port)
   (or (null port)
@@ -172,6 +221,11 @@ and with a trailing index.html removed. Returns NIL for non-http URLs."
               (push entry invalid)))))
     (values (nreverse origins) (nreverse invalid))))
 
+;;; Guards every redirect that takes a user-supplied target (e.g. logout's
+;;; ?return=). Without it, /logout?return=https://evil.example would make our
+;;; domain bounce users to an attacker's site (an "open redirect"). "//evil"
+;;; and "/\\evil" are rejected because browsers treat them as
+;;; protocol-relative URLs to another host.
 (defun local-path-p (path)
   "True for a same-origin relative path that is safe to redirect to."
   (and (stringp path) (plusp (length path))
@@ -181,6 +235,10 @@ and with a trailing index.html removed. Returns NIL for non-http URLs."
 
 (defun url-encode (s) (quri:url-encode (or s "")))
 
+;;; LOOP ... ON PAIRS BY #'CDDR walks a plist two elements at a time,
+;;; destructuring each step into (k v). ~{~a~^&~} is FORMAT's list
+;;; iteration: print each element, with "&" between (~^ stops before the
+;;; last separator).
 (defun query-string (&rest pairs)
   "(query-string \"a\" 1 \"b\" \"x y\") → \"a=1&b=x%20y\"; NIL values are skipped."
   (format nil "~{~a~^&~}"
@@ -198,6 +256,16 @@ and with a trailing index.html removed. Returns NIL for non-http URLs."
 
 ;;; ------------------------------------------------------------------
 ;;; A tiny in-memory sliding-window rate limiter.
+;;;
+;;; *RATE-BUCKETS* maps a key such as (:comment "203.0.113.9") to a list of
+;;; hit timestamps. The hash table is EQUAL so list keys compare by
+;;; structure. It's shared by all request threads, and hash tables aren't
+;;; thread-safe for concurrent writes, so every access holds *RATE-LOCK*
+;;; (BT:WITH-LOCK-HELD is a portable lock + unwind-protect).
+;;;
+;;; In memory, so limits reset on restart and aren't shared between
+;;; processes. That's fine for a single small container; a multi-instance
+;;; deployment would need the database or Redis instead.
 
 (defvar *rate-lock* (bt:make-lock "rate-limit"))
 (defvar *rate-buckets* (make-hash-table :test #'equal))
