@@ -71,22 +71,29 @@
 (defpage admin-home ("/admin" :decorators (@admin @no-cache)) (&get status)
   (let* ((status (and (member status '("pending" "published" "hidden") :test #'equal) status))
          (sites (list-sites))
+         (status-counts (site-status-counts))
          (comments (recent-comments :status status :limit 200)))
+    (flet ((site-count (site key)
+             (let ((row (find (getf site :id) status-counts :key (lambda (r) (getf r :id)))))
+               (princ-to-string (or (getf row key) 0)))))
     (admin-page ("Dashboard")
       (:h1 "Sites")
       (if (null sites)
           (:p.rf-empty "No sites yet. " (:a :href "/admin/sites/new" "Add the first one") ".")
           (:table
            (:thead (:tr (:th "Key") (:th "Name") (:th "Allowed origins") (:th "Enabled")
-                        (:th "Comments") (:th "")))
+                        (:th "Published") (:th "Pending") (:th "Hidden") (:th "")))
            (:tbody
             (dolist (s sites)
               (:tr (:td (:code (getf s :key)))
                    (:td (getf s :name))
                    (:td (format nil "~{~a~^, ~}" (getf s :origins)))
                    (:td (if (getf s :enabled) "yes" "no"))
-                   (:td (princ-to-string (getf s :comment-count)))
+                   (:td (site-count s :published))
+                   (:td (site-count s :pending))
+                   (:td (site-count s :hidden))
                    (:td (:a :href (format nil "/admin/sites/~d" (getf s :id)) "Edit")))))))
+      (stats-section)
       (:h2 "Comments")
       (:div.tabs
        (loop for (label value) in '(("All" nil) ("Pending" "pending")
@@ -129,7 +136,37 @@
                      (:td (getf e :action))
                      (:td (getf e :actor))
                      (:td (format nil "#~a " (getf e :comment-id))
-                          (:small.rf-muted (getf e :summary))))))))))))
+                          (:small.rf-muted (getf e :summary)))))))))))))
+
+(defun stats-section ()
+  "Activity charts, aggregated by SQLite (see the Aggregates section of db.lisp)."
+  (let* ((days (comments-per-day 30))
+         (peak (max 1 (reduce #'max days :key (lambda (d) (getf d :n)) :initial-value 0)))
+         (top (top-threads 10)))
+    (spinneret:with-html
+      (:h2 "Stats")
+      (:div.grid2
+       (:div
+        (:h3.rf-muted "Comments per day (30 days)")
+        (if (null days)
+            (:p.rf-empty "No comments in the last 30 days.")
+            (:table.bars
+             (:tbody
+              (dolist (d days)
+                (:tr (:td (:small (getf d :day)))
+                     (:td :style "width:100%"
+                          (:div.bar :style (format nil "width:~,1f%" (* 100 (/ (getf d :n) peak)))))
+                     (:td (princ-to-string (getf d :n)))))))))
+       (:div
+        (:h3.rf-muted "Most-commented threads")
+        (if (null top)
+            (:p.rf-empty "No published comments yet.")
+            (:ol
+             (dolist (th top)
+               (:li (:a :href (getf th :url) :target "_blank" :rel "noopener"
+                        (if (blank-p (getf th :title)) (getf th :url) (getf th :title)))
+                    (:small.rf-muted (format nil " · ~a · ~d" (getf th :site-key)
+                                             (getf th :n))))))))))))
 
 (defaction admin-comment-action ("/admin/comments/:id/:action" :decorators (@admin))
     (&path (id 'integer))

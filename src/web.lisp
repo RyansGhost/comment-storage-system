@@ -19,7 +19,7 @@
 (defvar *static* (make-hash-table :test #'equal))
 
 (defun reload-static ()
-  (dolist (name '("embed.js" "thread.js"))
+  (dolist (name '("embed.js" "thread.js" "count.js"))
     (setf (gethash name *static*) (uiop:read-file-string (static-path name)))))
 
 (reload-static)
@@ -379,6 +379,58 @@ The thread key is the embed's data-page-id when given, else the page URL."
 
 (easy-routes:defroute thread-js ("/static/thread.js" :method :get) ()
   (serve-js "thread.js"))
+
+(easy-routes:defroute count-js ("/count.js" :method :get) ()
+  (serve-js "count.js"))
+
+(defparameter *max-count-keys* 100)
+
+(defun json-response (object &key (status 200))
+  (setf (ht:content-type*) "application/json"
+        (ht:return-code*) status)
+  (jzon:stringify object))
+
+(defun allow-site-cors (site)
+  (let ((origin (ht:header-in* :origin)))
+    (when (and origin (member origin (getf site :origins) :test #'string=))
+      (setf (ht:header-out "Access-Control-Allow-Origin") origin
+            (ht:header-out "Vary") "Origin"))))
+
+(easy-routes:defroute api-counts ("/api/counts" :method :get) (&get site)
+  ;; GET /api/counts?site=blog&page=<url>&page=<url>&id=<page-id>...
+  ;; → {"<url or id as sent>": published-count, ...}
+  (let ((site (and site (site-by-key site)))
+        (requested (remove-duplicates
+                    (loop for (name . value) in (ht:get-parameters*)
+                          when (member name '("page" "id") :test #'string=)
+                            collect (cons name value))
+                    :test #'equal)))
+    (cond ((or (null site) (not (getf site :enabled)))
+           (json-response (alexandria:plist-hash-table '("error" "unknown site") :test #'equal)
+                          :status 404))
+          ((> (length requested) *max-count-keys*)
+           (json-response (alexandria:plist-hash-table
+                           (list "error" (format nil "at most ~d keys" *max-count-keys*))
+                           :test #'equal)
+                          :status 400))
+          (t
+           (allow-site-cors site)
+           (setf (ht:header-out "Cache-Control") "public, max-age=60")
+           ;; Map each requested value to its thread key: canonical URL for
+           ;; pages on this site's origins, the id itself for valid page ids.
+           (let* ((keyed (loop for (name . value) in requested
+                               collect (cons value
+                                             (if (string= name "page")
+                                                 (let ((url (canonical-page-url value)))
+                                                   (and url (site-allows-page-p site url) url))
+                                                 (clean-page-id value)))))
+                  (counts (thread-counts (getf site :id)
+                                         (remove-duplicates (remove nil (mapcar #'cdr keyed))
+                                                            :test #'string=)))
+                  (result (make-hash-table :test #'equal)))
+             (loop for (value . key) in keyed
+                   do (setf (gethash value result) (if key (gethash key counts 0) 0)))
+             (json-response result))))))
 
 (easy-routes:defroute api-comments ("/api/comments" :method :get) (&get site page id)
   (setf (ht:content-type*) "application/json")

@@ -33,7 +33,8 @@
                              (:file "main")))
                (:module "static"
                 :components ((:static-file "embed.js")
-                             (:static-file "thread.js"))))
+                             (:static-file "thread.js")
+                             (:static-file "count.js"))))
   :in-order-to ((test-op (test-op "rf-comments/tests"))))
 
 (asdf:defsystem "rf-comments/tests"

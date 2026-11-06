@@ -73,6 +73,9 @@ overflow:auto;font-size:.85em}
 .preview{width:100%;border:1px dashed var(--rf-border);border-radius:var(--rf-radius);min-height:20rem}
 .tabs{display:flex;gap:.75em;font-size:.9em;margin:.25em 0 .75em}
 .tabs a.on{font-weight:700;text-decoration:none;color:var(--rf-text)}
+.page h3{font-size:.95em;margin:.5em 0}
+table.bars td{border:0;padding:.1em .4em;white-space:nowrap}
+.bar{height:.7em;background:var(--rf-accent);border-radius:2px;min-width:2px}
 ")
 
 ;;; ------------------------------------------------------------------
