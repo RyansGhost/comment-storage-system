@@ -1,0 +1,35 @@
+# rf-comments — production compose file.
+#
+#   cp .env.example .env    # then edit it
+#   mkdir -p data && sudo chown 10001:10001 data
+#   docker compose up -d --build
+#
+# The service listens on 127.0.0.1:8080 only; put your existing reverse
+# proxy (Caddy, nginx, Traefik…) in front of it for comments.ryanfleck.ca.
+
+services:
+  comments:
+    build: .
+    image: rf-comments:latest
+    container_name: rf-comments
+    restart: unless-stopped
+    init: true
+    env_file: .env
+    environment:
+      PORT: "8080"
+      DB_PATH: /data/comments.db
+    volumes:
+      # The SQLite database (plus its -wal/-shm files) lives on the host.
+      - ./data:/data
+    ports:
+      - "127.0.0.1:${RF_COMMENTS_HOST_PORT:-8080}:8080"
+    # If your reverse proxy runs in Docker, join its network instead of
+    # publishing a port, e.g.:
+    # networks: [proxy]
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+# networks:
+#   proxy:
+#     external: true

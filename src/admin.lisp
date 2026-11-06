@@ -1,0 +1,279 @@
+;;;; admin.lisp — the tiny admin GUI: sites, themes and moderation.
+;;;;
+;;;; A single administrator authenticates with ADMIN_PASSWORD. The admin
+;;;; session cookie is scoped to /admin with SameSite=Strict.
+
+(in-package #:rf-comments)
+
+(defun admin-session-p ()
+  (and (find-session (ht:cookie-in +admin-cookie+) "admin") t))
+
+(defun @admin (next)
+  (cond ((null *admin-password*)
+         (error-page 404 "Not found" "The admin interface is disabled (ADMIN_PASSWORD is not set)."))
+        ((admin-session-p) (funcall next))
+        (t (redirect-to "/admin/login"))))
+
+(defmacro admin-page ((title) &body body)
+  `(progn
+     (set-security-headers)
+     (setf (ht:header-out "Cache-Control") "no-store")
+     (html-page (:title (format nil "~a · admin" ,title))
+       (:main.page
+        (:nav (:span (:a :href "/admin" (:strong "Comments admin")) " · "
+                     (:a :href "/admin/sites/new" "New site"))
+              (:form.rf-inline :method "post" :action "/admin/logout"
+                               (:button.rf-secondary :type "submit" "Log out")))
+        ,@body))))
+
+;;; ------------------------------------------------------------------
+;;; Login
+
+(defun admin-login-page (&optional error (status 200))
+  (set-security-headers)
+  (respond
+   (html-page (:title "Admin sign in")
+     (:main.page.narrow
+      (:h1 "Admin sign in")
+      (notice-html error "error")
+      (:form.rf-form :method "post" :action "/admin/login"
+       (:label "Password" (:input :type "password" :name "password" :required t :autofocus t
+                                  :autocomplete "current-password"))
+       (:div (:button :type "submit" "Sign in")))))
+   :status status))
+
+(easy-routes:defroute admin-login ("/admin/login" :method :get) ()
+  (cond ((null *admin-password*)
+         (error-page 404 "Not found" "The admin interface is disabled (ADMIN_PASSWORD is not set)."))
+        ((admin-session-p) (redirect-to "/admin"))
+        (t (admin-login-page))))
+
+(easy-routes:defroute admin-login-post ("/admin/login" :method :post :decorators (@same-origin))
+    (&post password)
+  (cond ((null *admin-password*) (error-page 404 "Not found" "Admin is disabled."))
+        ((rate-limited-p (list :admin-login (client-ip)) 5 60)
+         (admin-login-page "Too many attempts; wait a minute." 429))
+        ((constant-time-string= password *admin-password*)
+         (set-cookie +admin-cookie+ (create-session "admin" :ttl *admin-session-ttl*)
+                     :max-age *admin-session-ttl* :path "/admin" :same-site "Strict")
+         (redirect-to "/admin"))
+        (t (admin-login-page "Wrong password." 401))))
+
+(easy-routes:defroute admin-logout ("/admin/logout" :method :post :decorators (@same-origin))
+    ()
+  (delete-session (ht:cookie-in +admin-cookie+))
+  (clear-cookie +admin-cookie+ :path "/admin" :same-site "Strict")
+  (redirect-to "/admin/login"))
+
+;;; ------------------------------------------------------------------
+;;; Dashboard: sites + moderation queue
+
+(defun status-button (id action label &optional (class ""))
+  (spinneret:with-html
+    (:form :method "post" :action (format nil "/admin/comments/~d/~a" id action)
+           (:button :type "submit" :class class label))))
+
+(easy-routes:defroute admin-home ("/admin" :method :get :decorators (@admin)) (&get status)
+  (let* ((status (and (member status '("pending" "published" "hidden") :test #'equal) status))
+         (sites (list-sites))
+         (comments (recent-comments :status status :limit 200)))
+    (admin-page ("Dashboard")
+      (:h1 "Sites")
+      (if (null sites)
+          (:p.rf-empty "No sites yet. " (:a :href "/admin/sites/new" "Add the first one") ".")
+          (:table
+           (:thead (:tr (:th "Key") (:th "Name") (:th "Allowed origins") (:th "Enabled")
+                        (:th "Comments") (:th "")))
+           (:tbody
+            (dolist (s sites)
+              (:tr (:td (:code (getf s :key)))
+                   (:td (getf s :name))
+                   (:td (format nil "~{~a~^, ~}" (getf s :origins)))
+                   (:td (if (getf s :enabled) "yes" "no"))
+                   (:td (princ-to-string (getf s :comment-count)))
+                   (:td (:a :href (format nil "/admin/sites/~d" (getf s :id)) "Edit")))))))
+      (:h2 "Comments")
+      (:div.tabs
+       (loop for (label value) in '(("All" nil) ("Pending" "pending")
+                                    ("Published" "published") ("Hidden" "hidden"))
+             do (:a :class (if (equal value status) "on" "")
+                    :href (if value (format nil "/admin?status=~a" value) "/admin")
+                    label)))
+      (if (null comments)
+          (:p.rf-empty "Nothing here.")
+          (:table
+           (:thead (:tr (:th "Date") (:th "Site / page") (:th "Author") (:th "Comment")
+                        (:th "Status") (:th "")))
+           (:tbody
+            (dolist (c comments)
+              (:tr
+               (:td (human-date (getf c :created-at)))
+               (:td (:code (getf c :site-key)) (:br)
+                    (:a :href (getf c :page-url) :target "_blank" :rel "noopener"
+                        (truncate-string (getf c :page-url) 60)))
+               (:td (getf c :display-name) (:br)
+                    (:small.rf-muted (getf c :email)
+                                     (if (getf c :verified-at) " ✓" " (unverified)")))
+               (:td (truncate-string (getf c :body) 240))
+               (:td (getf c :status))
+               (:td (:div.rf-actions
+                     (unless (string= (getf c :status) "published")
+                       (status-button (getf c :id) "publish" "Publish"))
+                     (unless (string= (getf c :status) "hidden")
+                       (status-button (getf c :id) "hide" "Hide" "rf-secondary"))
+                     (status-button (getf c :id) "delete" "Delete" "rf-danger")))))))))))
+
+(easy-routes:defroute admin-comment-action ("/admin/comments/:id/:action" :method :post
+                                                                         :decorators (@admin @same-origin))
+    (&path (id 'integer))
+  (cond ((string= action "publish") (set-comment-status id "published"))
+        ((string= action "hide") (set-comment-status id "hidden"))
+        ((string= action "delete") (delete-comment id)))
+  (redirect-to (let ((ref (ht:header-in* :referer)))
+                 (if (and ref (equal (url-origin ref) (url-origin *public-url*)))
+                     (subseq ref (length (url-origin ref)))
+                     "/admin"))))
+
+;;; ------------------------------------------------------------------
+;;; Site editor
+
+(defun theme-placeholder (key)
+  (cdr (assoc key '(("accent" . "#2563eb") ("text" . "#1f2328") ("muted" . "#656d76")
+                    ("background" . "transparent") ("surface" . "#ffffff")
+                    ("border" . "#d0d7de") ("font" . "system-ui, sans-serif")
+                    ("radius" . "8px"))
+              :test #'string=)))
+
+(defun embed-snippet (key)
+  (format nil "<div id=\"rf-comments\"></div>~%<script src=\"~a/embed.js\" data-site=\"~a\" async></script>"
+          *public-url* key))
+
+(defun site-form-page (&key site values error (status 200))
+  "SITE is the stored row (NIL when creating); VALUES the submitted form plist."
+  (let* ((id (getf site :id))
+         (v (or values
+                (and site
+                     (list :key (getf site :key) :name (getf site :name)
+                           :origins (format nil "~{~a~%~}" (getf site :origins))
+                           :enabled (getf site :enabled) :theme (getf site :theme)))
+                (list :enabled t :theme (make-hash-table :test #'equal))))
+         (theme (getf v :theme)))
+    (respond
+     (admin-page ((if site (getf site :name) "New site"))
+       (:h1 (if site (format nil "Edit ~a" (getf site :name)) "New site"))
+       (notice-html error "error")
+       (:form.rf-form :method "post" :action (if id (format nil "/admin/sites/~d" id) "/admin/sites")
+        (:div.rf-row
+         (:label "Key (used in the embed code)"
+                 (:input :name "key" :required t :pattern "[a-z0-9][a-z0-9-]*" :maxlength 40
+                         :placeholder "blog" :value (getf v :key)))
+         (:label "Name" (:input :name "name" :required t :maxlength 100
+                                :placeholder "Ryan's blog" :value (getf v :name))))
+        (:label "Allowed origins — one per line; pages on these origins may embed comments"
+                (:textarea :name "origins" :rows 3 :placeholder "https://blog.ryanfleck.ca"
+                           (or (getf v :origins) "")))
+        (:label :style "display:flex;gap:.5em;align-items:center"
+                (:input :type "checkbox" :name "enabled" :value "1" :checked (getf v :enabled)
+                        :style "width:auto")
+                "Enabled")
+        (:h2 "Style")
+        (:div.grid2
+         (:label "Colour scheme"
+                 (:select :name "theme_scheme"
+                   (dolist (opt '("light" "dark" "auto"))
+                     (:option :value opt :selected (equal opt (or (gethash "scheme" theme) "light"))
+                              opt))))
+         (loop for (key . label) in *theme-keys*
+               unless (string= key "custom_css")
+                 do (:label label
+                            (:input :name (format nil "theme_~a" key) :maxlength 200
+                                    :placeholder (theme-placeholder key)
+                                    :value (gethash key theme)))))
+        (:label "Custom CSS (applied inside the comment frame)"
+                (:textarea :name "theme_custom_css" :rows 4 :style "font-family:monospace"
+                           :placeholder ".rf-comment { padding: 1em 0 }"
+                           (or (gethash "custom_css" theme) "")))
+        (:div.rf-actions (:span) (:button :type "submit" (if site "Save" "Create site"))))
+       (when site
+         (:h2 "Embed code")
+         (:p.rf-muted "Paste this where comments should appear. "
+                      "Optional attributes: data-page-url (canonical URL), data-page-title.")
+         (:pre (embed-snippet (getf site :key)))
+         (when (getf site :origins)
+           (:h2 "Preview")
+           (:iframe.preview
+            :title "Preview"
+            :src (thread-path (getf site :key)
+                              (format nil "~a/" (first (getf site :origins))) "Preview")))
+         (:h2 "Danger zone")
+         (:form :method "post" :action (format nil "/admin/sites/~d/delete" id)
+                (:button.rf-danger :type "submit" "Delete site and all its comments"))))
+     :status status)))
+
+(defun site-form-values ()
+  (let ((theme (make-hash-table :test #'equal)))
+    (dolist (key (cons "scheme" (mapcar #'car *theme-keys*)))
+      (setf (gethash key theme) (or (ht:post-parameter (format nil "theme_~a" key)) "")))
+    (list :key (string-downcase (trim (ht:post-parameter "key")))
+          :name (trim (ht:post-parameter "name"))
+          :origins (or (ht:post-parameter "origins") "")
+          :enabled (and (ht:post-parameter "enabled") t)
+          :theme theme)))
+
+(defun validate-site-values (v &optional existing-id)
+  "Returns an error message, or NIL if V is valid."
+  (multiple-value-bind (origins invalid) (parse-origins (getf v :origins))
+    (declare (ignore origins))
+    (let ((clash (site-by-key (getf v :key))))
+      (cond ((not (valid-site-key-p (getf v :key)))
+             "Key must be lowercase letters, digits and dashes.")
+            ((and clash (not (eql (getf clash :id) existing-id)))
+             "Another site already uses that key.")
+            ((blank-p (getf v :name)) "Name is required.")
+            ((> (length (getf v :name)) 100) "Name is too long.")
+            (invalid (format nil "Not valid origins: ~{~a~^, ~}" invalid))))))
+
+(defun save-site (v &optional id)
+  (let ((args (list :key (getf v :key) :name (getf v :name) :origins (getf v :origins)
+                    :enabled (getf v :enabled) :theme (getf v :theme))))
+    (if id
+        (progn (apply #'update-site id args) id)
+        (apply #'create-site args))))
+
+(easy-routes:defroute admin-site-new ("/admin/sites/new" :method :get :decorators (@admin)) ()
+  (site-form-page))
+
+(easy-routes:defroute admin-site-create ("/admin/sites" :method :post
+                                                        :decorators (@admin @same-origin))
+    ()
+  (let* ((v (site-form-values))
+         (error (validate-site-values v)))
+    (if error
+        (site-form-page :values v :error error :status 422)
+        (redirect-to (format nil "/admin/sites/~d" (save-site v))))))
+
+(easy-routes:defroute admin-site-edit ("/admin/sites/:id" :method :get :decorators (@admin))
+    (&path (id 'integer))
+  (let ((site (site-by-id id)))
+    (if site
+        (site-form-page :site site)
+        (error-page 404 "Not found" "No such site."))))
+
+(easy-routes:defroute admin-site-update ("/admin/sites/:id" :method :post
+                                                            :decorators (@admin @same-origin))
+    (&path (id 'integer))
+  (let ((site (site-by-id id)))
+    (if (null site)
+        (error-page 404 "Not found" "No such site.")
+        (let* ((v (site-form-values))
+               (error (validate-site-values v id)))
+          (if error
+              (site-form-page :site site :values v :error error :status 422)
+              (progn (save-site v id)
+                     (redirect-to (format nil "/admin/sites/~d" id))))))))
+
+(easy-routes:defroute admin-site-delete ("/admin/sites/:id/delete" :method :post
+                                                                   :decorators (@admin @same-origin))
+    (&path (id 'integer))
+  (delete-site id)
+  (redirect-to "/admin"))

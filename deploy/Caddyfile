@@ -1,0 +1,5 @@
+# Caddy (automatic HTTPS). Add to your existing Caddyfile.
+comments.ryanfleck.ca {
+	encode zstd gzip
+	reverse_proxy 127.0.0.1:8080
+}

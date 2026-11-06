@@ -1,0 +1,8 @@
+# Runtime data (the SQLite database lives here; bind-mounted into Docker)
+data/*
+!data/.gitkeep
+# Build output
+bin/
+*.fasl
+# Secrets
+.env
