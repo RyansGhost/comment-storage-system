@@ -1,9 +1,32 @@
 ;;;; main.lisp — start/stop from the REPL, and the executable entry point.
+;;;;
+;;;; Two ways the same code runs:
+;;;;  * Development: load the system in a REPL and call (start) / (stop).
+;;;;    The server runs in background threads while the REPL stays usable,
+;;;;    so redefining a function (C-c C-c in SLY) changes the live server.
+;;;;  * Production: build.lisp saves an executable whose entry point is MAIN.
+;;;;    MAIN reads the environment, calls START, then parks the main thread
+;;;;    forever while Hunchentoot's threads serve requests.
 
 (in-package #:rf-comments)
 
 (defvar *acceptor* nil "The running Hunchentoot acceptor, if any.")
 
+;;; Hunchentoot globals set here:
+;;;   *HUNCHENTOOT-DEFAULT-EXTERNAL-FORMAT*  decode forms and encode bodies
+;;;                                          as UTF-8. Current Hunchentoot
+;;;                                          already defaults to UTF-8; it's
+;;;                                          set explicitly because comments
+;;;                                          in any language depend on it,
+;;;                                          and globals can be changed by
+;;;                                          other code in the image.
+;;;   *DEFAULT-CONTENT-TYPE*                 name the charset in the header
+;;;                                          too
+;;;   *SHOW-LISP-ERRORS-P* NIL               never show backtraces to visitors
+;;;   *REWRITE-FOR-SESSION-URLS* NIL         we don't use Hunchentoot sessions
+;;; HT:START returns immediately; the acceptor runs in its own threads. The
+;;; access log (one line per request) goes to stdout and errors to stderr,
+;;; which is what `docker logs` collects.
 (defun start (&key (port *port*) (address *address*) (db-path *db-path*))
   "Open the database and start serving. Safe to call again to restart."
   (when *acceptor* (stop))
@@ -21,6 +44,7 @@
           (or address "*") port *public-url* db-path *email-backend*)
   *acceptor*)
 
+;;; :SOFT T lets in-flight requests finish before the listener closes.
 (defun stop ()
   (when *acceptor*
     (ignore-errors (ht:stop *acceptor* :soft t))

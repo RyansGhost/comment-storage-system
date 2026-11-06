@@ -1,4 +1,10 @@
 ;;;; tests/unit.lisp — pure functions and the data model.
+;;;;
+;;;; Fast tests with no network: string and URL helpers, validation,
+;;;; escaping, crypto helpers, and the SQL layer against an in-memory SQLite
+;;;; database (WITH-TEMP-DB). Migration tests build a database at an *older*
+;;;; schema version by rebinding *MIGRATIONS* to a prefix of the list, then
+;;;; reopen it with the full list to prove upgrades work on existing data.
 
 (in-package #:rf-comments/tests)
 

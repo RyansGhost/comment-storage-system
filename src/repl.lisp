@@ -24,11 +24,19 @@
   "Contribs SLY asks for on connect; preloaded because the executable has
 no source tree or Quicklisp to load them from at run time.")
 
+;;; Notice the code below never writes slynk:create-server literally. The
+;;; reader resolves package prefixes when it *reads* a file, so mentioning
+;;; SLYNK: here would make this file fail to load wherever Slynk isn't
+;;; installed (tests without it, dev images). UIOP:SYMBOL-CALL and
+;;; UIOP:FIND-SYMBOL* look the symbol up at *run* time instead, a common
+;;; idiom for optional dependencies.
 (defun load-repl-config ()
   (setf *slynk-port* (let ((p (env "SLYNK_PORT"))) (and p (parse-integer p)))
         *slynk-interface* (env "SLYNK_INTERFACE" *slynk-interface*)
         *slynk-secret* (env "SLYNK_SECRET" *slynk-secret*)))
 
+;;; SB-POSIX gives direct access to POSIX calls (getpid, chmod, setenv). It's
+;;; SBCL-specific, which is fine here: the production build targets SBCL.
 (defun install-slynk-secret (secret)
   "Slynk reads the secret from (user-homedir-pathname)/.sly-secret on every
 connection, so give this process a private HOME holding just that file."
@@ -44,6 +52,12 @@ connection, so give this process a private HOME holding just that file."
 
 (defvar *slynk-hardened* nil)
 
+;;; Functions are first-class and global function definitions are just a
+;;; mutable cell: (setf (fdefinition 'name) new-function) replaces what
+;;; NAME calls everywhere, immediately. Wrapping a library's internal
+;;; function this way is a small, local form of "advice" (cf. Emacs
+;;; advice-add). It's fragile across library versions, so it's limited to
+;;; the two functions we need and covered by tests.
 (defun wrap-function (name wrapper)
   "Replace the function NAME with (lambda (&rest args) (funcall WRAPPER original args))."
   (let ((original (fdefinition name)))

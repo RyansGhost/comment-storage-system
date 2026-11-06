@@ -2,18 +2,35 @@
 ;;;;
 ;;;; A single administrator authenticates with ADMIN_PASSWORD. The admin
 ;;;; session cookie is scoped to /admin with SameSite=Strict.
+;;;;
+;;;; Design notes:
+;;;; * One admin, one password from the environment. Multi-user roles would
+;;;;   be overkill for a personal service, and an unset ADMIN_PASSWORD
+;;;;   disables the whole area (404), so a forgotten config can't leave an
+;;;;   open admin panel.
+;;;; * Server-rendered forms, no JavaScript: every action is a <form> POST
+;;;;   handled by a DEFACTION (CSRF-checked), followed by a redirect back.
+;;;; * The admin cookie's SameSite=Strict means it's never sent on requests
+;;;;   started by another site, not even top-level links, a second layer of
+;;;;   CSRF protection on top of the Origin check.
 
 (in-package #:rf-comments)
 
 (defun admin-session-p ()
   (and (find-session (ht:cookie-in +admin-cookie+) "admin") t))
 
+;;; The decorator form of an authorisation check. Routes opt in with
+;;; :decorators (@admin), so the check can't be skipped inside a handler,
+;;; and it's visible at the route definition.
 (defun @admin (next)
   (cond ((null *admin-password*)
          (error-page 404 "Not found" "The admin interface is disabled (ADMIN_PASSWORD is not set)."))
         ((admin-session-p) (funcall next))
         (t (redirect-to "/admin/login"))))
 
+;;; A layout macro layered on HTML-PAGE (views.lisp): macros composing
+;;; macros, each adding one layer of boilerplate. Security headers and
+;;; no-store caching come from the DEFPAGE/DEFACTION routes that call it.
 (defmacro admin-page ((title) &body body)
   "Admin layout. Headers come from the DEFPAGE/DEFACTION route macros."
   `(html-page (:title (format nil "~a · admin" ,title))
@@ -45,6 +62,10 @@
         ((admin-session-p) (redirect-to "/admin"))
         (t (admin-login-page))))
 
+;;; Brute-force protection is a strict per-IP rate limit (5 tries a minute)
+;;; plus the constant-time comparison from util.lisp. A successful login
+;;; creates a DB-backed session like users get, but of kind "admin", with a
+;;; shorter lifetime.
 (defaction admin-login-post ("/admin/login") (&post password)
   (cond ((null *admin-password*) (error-page 404 "Not found" "Admin is disabled."))
         ((rate-limited-p (list :admin-login (client-ip)) 5 60)
@@ -63,6 +84,11 @@
 ;;; ------------------------------------------------------------------
 ;;; Dashboard: sites + moderation queue
 
+;;; Each moderation button is its own tiny <form method=post>. Using GET
+;;; links for actions would let any page, an image tag or a mail scanner
+;;; trigger them; POST + DEFACTION keeps them CSRF-safe.
+;;; SPINNERET:WITH-HTML (not -STRING) makes this helper print into the page
+;;; that's being built by its caller.
 (defun status-button (id action label &optional (class ""))
   (spinneret:with-html
     (:form :method "post" :action (format nil "/admin/comments/~d/~a" id action)
@@ -168,6 +194,10 @@
                     (:small.rf-muted (format nil " · ~a · ~d" (getf th :site-key)
                                              (getf th :n))))))))))))
 
+;;; One route for publish/hide/delete. The action is the :action URL
+;;; segment, and each maps to a generic function from events.lisp, so the
+;;; audit-log observer records it (BY = :admin). We redirect back to the
+;;; Referer when it's our own page, so a filtered list stays filtered.
 (defaction admin-comment-action ("/admin/comments/:id/:action" :decorators (@admin))
     (&path (id 'integer))
   (let ((comment (comment-by-id id)))
@@ -194,6 +224,10 @@
   (format nil "<div id=\"rf-comments\"></div>~%<script src=\"~a/embed.js\" data-site=\"~a\" async></script>"
           *public-url* key))
 
+;;; One function renders the form for create, edit and failed validation.
+;;; VALUES (what was just submitted) wins over SITE (what's stored), so a
+;;; rejected form comes back with the user's input intact rather than
+;;; reverting it.
 (defun site-form-page (&key site values error (status 200))
   "SITE is the stored row (NIL when creating); VALUES the submitted form plist."
   (let* ((id (getf site :id))
@@ -307,6 +341,9 @@
                      (move-thread id new-key new-url)
                      (redirect-to (format nil "/admin/sites/~d" (getf site :id)))))))))))
 
+;;; Reading POST fields directly with HT:POST-PARAMETER, rather than via the
+;;; route's &post list, because the theme fields are dynamic (one per entry
+;;; in *THEME-KEYS*).
 (defun site-form-values ()
   (let ((theme (make-hash-table :test #'equal)))
     (dolist (key (cons "scheme" (mapcar #'car *theme-keys*)))

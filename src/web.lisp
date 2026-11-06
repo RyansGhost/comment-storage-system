@@ -1,8 +1,30 @@
 ;;;; web.lisp — public routes: embed script, comment thread, email
 ;;;; verification, magic-link login, profile, JSON API.
+;;;;
+;;;; The public half of the service. Routes, by audience:
+;;;;   embedding pages   /embed.js, /count.js, /api/comments, /api/counts
+;;;;   the iframe        /thread (GET), /thread/comment (POST),
+;;;;                     /static/thread.js, /avatar/:key
+;;;;   email links       /verify, /login/callback (GET confirm + POST act)
+;;;;   people            /login, /logout, /me…
+;;;;   operations        /healthz
+;;;;
+;;;; How embedding works (see static/embed.js): a blog page includes our
+;;;; script, which adds an <iframe src="https://comments…/thread?site=…&page=…">.
+;;;; Everything inside the frame is a normal server-rendered page from *our*
+;;;; origin: its CSS can't leak into the blog or vice versa, and its forms
+;;;; post to us directly with our cookies. Since the blogs are
+;;;; *.ryanfleck.ca subdomains, the iframe is *same-site* with them, so
+;;;; browsers that block third-party cookies still send ours.
 
 (in-package #:rf-comments)
 
+;;; A subclass rather than using EASY-ROUTES:ROUTES-ACCEPTOR directly gives
+;;; us a named class to specialise later (e.g. a custom 404 page via
+;;; HUNCHENTOOT:ACCEPTOR-STATUS-MESSAGE) without touching main.lisp.
+;;; ROUTES-ACCEPTOR (unlike EASY-ROUTES-ACCEPTOR) serves *only* our routes:
+;;; no fallback to Hunchentoot's static-file and easy-handler dispatch, so
+;;; nothing is reachable by accident.
 (defclass app-acceptor (easy-routes:routes-acceptor) ()
   (:documentation "Hunchentoot acceptor serving only our easy-routes."))
 
@@ -13,6 +35,11 @@
 ;;; Static assets — read at load time so the saved executable has them.
 ;;; In the REPL, re-evaluate (reload-static) after editing static/*.js.
 
+;;; ASDF:SYSTEM-RELATIVE-PATHNAME finds files relative to the .asd, wherever
+;;; the project is checked out. RELOAD-STATIC runs at *load* time (the
+;;; top-level call below), so the file contents are captured in *STATIC* and
+;;; saved inside the executable by SAVE-LISP-AND-DIE; the Docker runtime
+;;; image has no source tree at all.
 (defun static-path (name)
   (asdf:system-relative-pathname "rf-comments" (format nil "static/~a" name)))
 
@@ -25,6 +52,15 @@
 (reload-static)
 
 ;;; Cookies
+;;;
+;;; HT:SET-COOKIE adds a Set-Cookie header to the current reply. Attributes:
+;;;   HttpOnly   JavaScript can't read it, so a script injected into some
+;;;              page could not steal the session
+;;;   Secure     only sent over HTTPS (on automatically for https PUBLIC_URL)
+;;;   SameSite   Lax: sent on same-site requests and top-level navigations,
+;;;              which covers our iframe on *.ryanfleck.ca. The admin cookie
+;;;              uses Strict and Path=/admin.
+;;;   Max-Age    lifetime in seconds; 0 deletes the cookie
 
 (defun set-cookie (name value &key (max-age *session-ttl*) (path "/") (same-site "Lax"))
   (ht:set-cookie name :value value :path path :max-age max-age :http-only t
@@ -57,6 +93,11 @@
   (respond (html-page (:title "Comments" :css "")
              (:main.rf (:p.rf-empty message)))))
 
+;;; RENDER-THREAD is a function rather than inline in the route because two
+;;; routes need it: GET /thread, and POST /thread/comment when validation
+;;; fails (re-render with the error and the user's input preserved, status
+;;; 422). It's also where the frame-ancestors CSP is narrowed to the site's
+;;; own origins, so only those pages can embed this thread.
 (defun render-thread (site page-url title &key page-id thread user notice error form
                                                 (status 200))
   (set-security-headers :frame-ancestors (frame-ancestors site))
@@ -130,6 +171,11 @@
        (:script :src "/static/thread.js"))
      :status status)))
 
+;;; Every thread request carries untrusted ?site= and ?page= values, so this
+;;; is the gatekeeper: the site must exist and be enabled, the page must be
+;;; an http(s) URL, and its origin must be one of the site's allowed
+;;; origins. Errors come back as (values nil message), the same convention
+;;; as the CLEAN-* functions.
 (defun resolve-thread (site-key page &optional raw-page-id)
   "Return (values site page-url page-id page-key), or (values nil error-message).
 The thread key is the embed's data-page-id when given, else the page URL."
@@ -157,6 +203,19 @@ The thread key is the embed's data-page-id when given, else the page URL."
           (render-thread site page-url title :page-id page-id :thread thread
                                              :user (current-user) :notice notice)))))
 
+;;; The heart of the service. Steps, in order:
+;;;   1. resolve the site and page (or show "not enabled")
+;;;   2. honeypot: a hidden "website" field humans never fill in; bots fill
+;;;      every field. Pretend success, store nothing.
+;;;   3. per-IP rate limit
+;;;   4. validate the inputs (WITH-VALID-INPUTS)
+;;;   5a. signed in: create the comment and publish it immediately (the
+;;;       session already proves the email)
+;;;   5b. anonymous: create it as pending and email a verification link.
+;;;       The comment stays invisible until that link is used.
+;;; FLET defines local helper functions: FAIL re-renders the form with an
+;;; error, BACK-TO-THREAD redirects (Post/Redirect/Get), and THREAD-ID
+;;; creates the thread row only once a comment really exists.
 (defaction post-comment ("/thread/comment")
     (&post site page id title name email body website)
   (multiple-value-bind (site page-url page-id key) (resolve-thread site page id)
@@ -214,6 +273,11 @@ The thread key is the embed's data-page-id when given, else the page URL."
 ;;; Email confirmation. GET shows a button; POST does the work, so that
 ;;; link scanners in mail clients can't consume the single-use token.
 
+;;; Why not act on the GET itself? Corporate mail filters and some clients
+;;; "pre-click" every link in an email to scan it. A GET that publishes or
+;;; signs in would be triggered by the scanner (and the single-use token
+;;; burnt), so the link only shows a button, and the POST it submits does
+;;; the work. Scanners don't submit forms.
 (defun confirm-page (title message action token button &key excerpt redirect-origin)
   ;; Not "no-referrer": that makes browsers send "Origin: null" with the
   ;; form POST, which @SAME-ORIGIN (rightly) rejects. "same-origin" still
@@ -262,6 +326,11 @@ The thread key is the embed's data-page-id when given, else the page URL."
 
 ;;; ------------------------------------------------------------------
 ;;; Magic-link login
+;;;
+;;; Passwordless sign-in: enter your email, receive a one-time link, click,
+;;; confirm, and you're in. The answer is identical whether or not the
+;;; address has an account, so the form can't be used to discover who
+;;; comments here (no "account enumeration").
 
 (defun login-page (&key notice error (status 200) email)
   (respond
@@ -317,6 +386,10 @@ The thread key is the embed's data-page-id when given, else the page URL."
 ;;; ------------------------------------------------------------------
 ;;; Profile
 
+;;; @USER shows how decorators pass data inward: it binds the special
+;;; variable *USER* around (funcall next), so the route body can use *USER*
+;;; directly. The binding is per thread and per request, and disappears
+;;; when the request ends.
 (defvar *user* nil "The signed-in user inside @USER routes.")
 
 (defun @user (next)
@@ -387,6 +460,9 @@ The thread key is the embed's data-page-id when given, else the page URL."
 ;;; ------------------------------------------------------------------
 ;;; Assets, JSON API, health
 
+;;; Non-HTML responses: set Content-Type explicitly and return the body. A
+;;; short public cache (5 minutes) lets browsers reuse embed.js while still
+;;; picking up changes quickly after a deploy.
 (defun serve-js (name)
   (setf (ht:content-type*) "application/javascript; charset=utf-8"
         (ht:header-out "Cache-Control") "public, max-age=300"
@@ -402,6 +478,9 @@ The thread key is the embed's data-page-id when given, else the page URL."
 (easy-routes:defroute count-js ("/count.js" :method :get) ()
   (serve-js "count.js"))
 
+;;; Returning an octet vector (raw image bytes) from a route works just like
+;;; returning a string: Hunchentoot writes it as the body. KEY is bound from
+;;; the :key segment of the URL template.
 (easy-routes:defroute avatar ("/avatar/:key" :method :get) ()
   (let ((user (and (eq *avatars* :gravatar)
                    (<= 1 (length key) 64)
@@ -422,6 +501,14 @@ The thread key is the embed's data-page-id when given, else the page URL."
 
 (defparameter *max-count-keys* 100)
 
+;;; JSON: JZON:STRINGIFY turns hash tables into objects and vectors into
+;;; arrays. ALEXANDRIA:PLIST-HASH-TABLE is a handy way to write a small
+;;; object inline.
+;;;
+;;; CORS: browsers forbid a script on blog.ryanfleck.ca from reading our
+;;; responses unless we answer with Access-Control-Allow-Origin naming that
+;;; origin. We echo the request's Origin only if it's one of the site's
+;;; configured origins (plus Vary: Origin so caches keep per-origin copies).
 (defun json-response (object &key (status 200))
   (setf (ht:content-type*) "application/json"
         (ht:return-code*) status)
@@ -490,6 +577,9 @@ The thread key is the embed's data-page-id when given, else the page URL."
                            :test #'equal))
             'vector))))))
 
+;;; Used by Docker's HEALTHCHECK (via `rf-comments healthcheck`, main.lisp)
+;;; and by humans with curl. It touches the database so a broken volume shows
+;;; up as unhealthy.
 (easy-routes:defroute healthz ("/healthz" :method :get) ()
   (setf (ht:content-type*) "text/plain")
   (handler-case (progn (query-one "SELECT 1") "ok")

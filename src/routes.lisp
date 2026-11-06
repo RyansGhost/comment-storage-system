@@ -14,12 +14,49 @@
 ;;;; (multiple-value-bind (clean err) (clean-x input) ...) checks.
 ;;;;
 ;;;; Non-HTML GET endpoints (scripts, JSON, health) still use DEFROUTE.
+;;;;
+;;;; ----------------------------------------------------------------------
+;;;; How a request flows through Hunchentoot and easy-routes
+;;;; ----------------------------------------------------------------------
+;;;; 1. An *acceptor* (APP-ACCEPTOR in web.lisp, created in main.lisp) listens
+;;;;    on a port. Its default *taskmaster* spawns one thread per connection.
+;;;; 2. For each request, Hunchentoot binds two special variables in that
+;;;;    thread: HUNCHENTOOT:*REQUEST* (what came in) and *REPLY* (what will
+;;;;    go out). The "starred" accessors read or write the *current* one
+;;;;    without passing it around:
+;;;;      (ht:header-in* :origin)           request header
+;;;;      (ht:get-parameter "x")            query-string parameter
+;;;;      (ht:post-parameter "x")           form field
+;;;;      (ht:cookie-in "name")             cookie
+;;;;      (setf (ht:header-out "X-Foo") v)  response header
+;;;;      (setf (ht:return-code*) 404)      status code
+;;;;      (setf (ht:content-type*) "…")     Content-Type
+;;;;    This works because each request has its own thread, and special
+;;;;    variable bindings are per thread.
+;;;; 3. easy-routes' acceptor matches the path and method against routes
+;;;;    declared with EASY-ROUTES:DEFROUTE, binds the URL's :params, and
+;;;;    calls the route function.
+;;;; 4. Whatever the route function *returns*, a string or an octet vector,
+;;;;    becomes the response body. There is no response object to build.
+;;;; 5. HT:REDIRECT (and ABORT-REQUEST-HANDLER) end handling early with a
+;;;;    non-local exit, like an exception, so code after them never runs.
+;;;;
+;;;; Decorators are easy-routes' middleware: a decorator is a function
+;;;; (lambda (next) …) that may do work before or after calling NEXT, or
+;;;; answer itself and never call it (e.g. a 403 from @SAME-ORIGIN). In a
+;;;; :DECORATORS list the first one is the outermost wrapper.
 
 (in-package #:rf-comments)
 
 ;;; ------------------------------------------------------------------
 ;;; Request helpers
 
+;;; Behind a reverse proxy (Caddy/nginx), every connection comes *from the
+;;; proxy*, so REMOTE-ADDR is useless and the real client is in
+;;; X-Forwarded-For. A client can send its own fake X-Forwarded-For, but the
+;;; proxy *appends* the address it actually saw, so only the LAST entry is
+;;; trustworthy. Hunchentoot's REAL-REMOTE-ADDR takes the first, which is
+;;; why we don't use it.
 (defun client-ip ()
   (or (when *trust-proxy*
         (let ((xff (ht:header-in* :x-forwarded-for)))
@@ -32,10 +69,26 @@
       (concatenate 'string *public-url* path-or-url)
       path-or-url))
 
+;;; 303 See Other after a POST is the Post/Redirect/Get pattern: the
+;;; browser follows with a GET, so reload doesn't re-submit the form.
+;;; Hunchentoot can build absolute URLs itself, but behind a TLS-terminating
+;;; proxy it sees plain http, so we build them from *PUBLIC-URL* instead.
 (defun redirect-to (path-or-url)
   "303 See Other, always to an absolute URL (correct behind a TLS proxy)."
   (ht:redirect (absolute-url path-or-url) :code ht:+http-see-other+))
 
+;;; Defence in depth for every HTML response:
+;;;   X-Content-Type-Options: nosniff   don't guess types (no HTML-from-JSON)
+;;;   Referrer-Policy                   don't leak our URLs (which may hold
+;;;                                     tokens) to other sites
+;;;   Content-Security-Policy           what the page may load and do:
+;;;     script-src 'self'   only our own .js files, so no inline scripts and
+;;;                         therefore no injected ones, even if escaping
+;;;                         somehow failed
+;;;     form-action         where forms may submit (and redirect)
+;;;     frame-ancestors     who may embed us in an iframe ('none' except
+;;;                         for the comment thread, which allows the site's
+;;;                         own origins)
 (defun set-security-headers (&key (frame-ancestors "'none'") (referrer "same-origin")
                                 (form-action "'self'"))
   (setf (ht:header-out "X-Content-Type-Options") "nosniff"
@@ -54,6 +107,14 @@
   (set-security-headers)
   (respond (simple-page title message :kind "error") :status status))
 
+;;; CSRF protection. A malicious page can make the visitor's browser POST a
+;;; form to us, and the browser attaches our cookies. But browsers also send
+;;; an Origin header naming the page that submitted it, which the attacker's
+;;; page cannot forge. Accepting POSTs only when Origin (or, from older
+;;; browsers, Referer) is our own origin blocks such cross-site requests.
+;;; It's simpler than per-form CSRF tokens, and OWASP lists it as a primary
+;;; defence. "null" (sent e.g. under Referrer-Policy: no-referrer) is
+;;; treated as untrusted.
 (defun origin-ok-p ()
   "True if the request's Origin (or, failing that, Referer) is our own."
   (let* ((ours (url-origin *public-url*))
@@ -86,6 +147,17 @@ SET-SECURITY-HEADERS again, which overrides these."
 
 ;;; ------------------------------------------------------------------
 ;;; Route macros
+;;;
+;;; These expand into EASY-ROUTES:DEFROUTE with a decorator list assembled
+;;; at macroexpansion time. Try (macroexpand-1 '(defaction foo ("/x") ()
+;;; :body)) in the REPL to see the result. A route macro means every new
+;;; handler inherits the security defaults by construction, rather than
+;;; depending on each author remembering them.
+;;;
+;;; DEFROUTE's parameter list, (&get a b &post c &path (id 'integer)), binds
+;;; query parameters, form fields and typed URL segments to variables. A
+;;; missing parameter is NIL. The route name is also a DEFUN, so
+;;; (return-from post-comment …) works inside its body.
 
 (defvar *actions* '()
   "Path templates of every DEFACTION route. Each one is CSRF-protected;
@@ -109,6 +181,11 @@ no-store caching and the default headers, then DECORATORS."
          ,params
        ,@body)))
 
+;;; Implementation notes: GENSYM'd names for the BLOCK and the FLET keep the
+;;; macro *hygienic*, so a user's body that defines its own block or
+;;; function with the same name can't collide with ours. REDUCE :FROM-END T
+;;; builds the nested MULTIPLE-VALUE-BINDs from the inside out, so the first
+;;; binding ends up outermost and is checked first.
 (defmacro with-valid-inputs (bindings (on-error (err) &body handler) &body body)
   "Clean and validate inputs in order; stop at the first invalid one.
 
