@@ -108,28 +108,52 @@
   (respond (simple-page title message :kind "error") :status status))
 
 ;;; CSRF protection. A malicious page can make the visitor's browser POST a
-;;; form to us, and the browser attaches our cookies. But browsers also send
-;;; an Origin header naming the page that submitted it, which the attacker's
-;;; page cannot forge. Accepting POSTs only when Origin (or, from older
-;;; browsers, Referer) is our own origin blocks such cross-site requests.
-;;; It's simpler than per-form CSRF tokens, and OWASP lists it as a primary
-;;; defence. "null" (sent e.g. under Referrer-Policy: no-referrer) is
-;;; treated as untrusted.
-(defun origin-ok-p ()
-  "True if the request's Origin (or, failing that, Referer) is our own."
-  (let* ((ours (url-origin *public-url*))
-         (origin (ht:header-in* :origin))
-         (referer (ht:header-in* :referer)))
-    (cond ((and origin (string/= origin "null")) (equal (url-origin origin) ours))
-          (referer (equal (url-origin referer) ours))
-          (t nil))))
+;;; form to us, and the browser attaches our cookies. Browsers also tell us
+;;; where a request came from, in headers the attacker's page cannot forge.
+;;; Every POST must pass two checks, in the terms of OWASP's CSRF Prevention
+;;; Cheat Sheet
+;;; (https://cheatsheetseries.owasp.org/cheatsheets/Cross-Site_Request_Forgery_Prevention_Cheat_Sheet.html):
+;;;
+;;;  1. Fetch Metadata, one of OWASP's *primary* defences for software that
+;;;     targets modern browsers. Browsers send Sec-Fetch-Site on every
+;;;     request (all major browsers since March 2023, per OWASP). We accept
+;;;     only "same-origin". "cross-site", "same-site" (another
+;;;     *.ryanfleck.ca subdomain) and "none" are rejected; every legitimate
+;;;     form in this app posts to its own origin, the iframe's included.
+;;;  2. Origin, or Referer when Origin is absent, must equal our origin.
+;;;     OWASP lists this check under "Defense In Depth", and makes it the
+;;;     *mandatory* fallback for browsers that don't send Fetch Metadata.
+;;;     A present Origin must match, so "Origin: null" fails (URL-ORIGIN
+;;;     returns NIL for it). Opaque origins such as sandboxed iframes
+;;;     produce "null", and an attacker can create one, so OWASP says
+;;;     never to treat it as same-origin.
+;;;
+;;; SameSite cookies (set in web.lisp and admin.lisp) are a third,
+;;; defence-in-depth layer.
+;;;
+;;; Why not CSRF tokens, OWASP's first recommendation for broad browser
+;;; support? Every form here is server-rendered and posted same-origin;
+;;; modern browsers get the Fetch Metadata check, and older ones still send
+;;; Origin on POST. Because the check lives in DEFACTION, no new route can
+;;; forget it. If very old browsers ever matter, tokens are the upgrade path.
+(defun same-origin-request-p ()
+  "True if this request comes from one of our own pages, judged by Fetch
+Metadata (when sent) and by Origin, or Referer when Origin is absent."
+  (let ((ours (url-origin *public-url*))
+        (fetch-site (ht:header-in* :sec-fetch-site))
+        (origin (ht:header-in* :origin))
+        (referer (ht:header-in* :referer)))
+    (and (or (null fetch-site) (string= fetch-site "same-origin"))
+         (cond (origin (equal (url-origin origin) ours))
+               (referer (equal (url-origin referer) ours))
+               (t nil)))))
 
 ;;; ------------------------------------------------------------------
 ;;; Decorators (outermost first in a :DECORATORS list)
 
 (defun @same-origin (next)
   "Reject state-changing requests that don't come from our own pages."
-  (if (origin-ok-p)
+  (if (same-origin-request-p)
       (funcall next)
       (error-page 403 "Forbidden" "This form must be submitted from comments pages.")))
 
