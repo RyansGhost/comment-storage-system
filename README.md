@@ -55,13 +55,18 @@ Optional attributes on the `<script>` tag:
 | Attribute | Default | Purpose |
 |---|---|---|
 | `data-site` | — (required) | Site key from the admin GUI |
+| `data-page-id` | none | Stable thread id that survives URL changes (like `disqus_identifier`), e.g. `post-42` or a Hugo `.File.UniqueID`. 1–200 of `A-Z a-z 0-9 . _ : / -`. |
 | `data-page-url` | `location.href` | Canonical URL for the thread. Use it when one article is reachable at several URLs. |
 | `data-page-title` | `document.title` | Title shown on profile and admin pages |
 | `data-target` | `rf-comments` | Id of the container element |
 
-Pages are identified by **origin + path**. The query string and `#fragment`
-are ignored, and a trailing `index.html` is dropped, so `/post/?utm=x` and
-`/post/index.html` share one thread.
+Without `data-page-id`, a thread is identified by the page's **origin +
+path**. The query string and `#fragment` are ignored, and a trailing
+`index.html` is dropped, so `/post/?utm=x` and `/post/index.html` share one
+thread. Renaming a slug or moving domains would then start a new, empty
+thread. With `data-page-id`, the thread follows the page and records its
+new URL the next time it loads. Threads that already exist can be re-keyed
+or merged from the admin.
 
 For Hugo, a partial such as `layouts/partials/comments.html` holding the
 snippet with `data-page-url="{{ .Permalink }}"` works well.
@@ -184,6 +189,10 @@ Tunables (limits, token lifetimes) are special variables at the top of
   appear on the edit page.
 - **Moderation:** recent comments, filterable by status, with publish, hide,
   and delete actions.
+- **Threads:** each site's page lists its threads (key, current URL,
+  comment count). A *Move* form changes a thread's key and/or URL, for
+  example to adopt a `data-page-id` after the fact. Moving onto a key another
+  thread already uses merges the two.
 - **Activity:** an audit log of the last 50 publish/hide/delete actions and
   who did them (`author` or `admin`). Entries outlive deleted comments.
 - **Notifications:** with `ADMIN_EMAIL` set, you get an email each time a

@@ -420,3 +420,69 @@ Returns (values body status headers-hash-table)."
              (is (has "1 comment" (req :get (thread-path))))
              (is (equal '(("publish" "author")) (log-actions))))
         (remove-method #'rf-comments::publish-comment method)))))
+
+;;; ------------------------------------------------------------------
+;;; Stable thread ids
+
+(defun id-thread-path (id page)
+  (format nil "/thread?site=blog&id=~a&page=~a" id (quri:url-encode page)))
+
+(test page-id-threads-survive-url-changes
+  (with-test-server ()
+    (make-blog-site (admin-jar))
+    (let ((alice (cl-cookie:make-cookie-jar))
+          (old "https://blog.example.com/2026/old-slug/")
+          (new "https://blog.example.com/2026/new-slug/"))
+      ;; Comment while the post lives at its old URL.
+      (req :post "/thread/comment" :jar alice
+                                   :params `(("site" . "blog") ("page" . ,old) ("id" . "post-42")
+                                             ("name" . "Alice") ("email" . "a@example.com")
+                                             ("body" . "kept across moves")))
+      (req :post "/verify" :jar alice :params `(("token" . ,(last-email-token))))
+      ;; The post moves: same data-page-id, new URL. The thread follows it.
+      (let ((thread (req :get (id-thread-path "post-42" new))))
+        (is (has "1 comment" thread))
+        (is (has "kept across moves" thread))
+        (is (has "name=id value=post-42" thread)))
+      (is (string= new (getf (rf-comments::thread-by-key 1 "post-42") :url)))
+      ;; The old URL without an id is a different (empty) thread.
+      (is (has "0 comments" (req :get (thread-path :page old))))
+      ;; Profile links point at the page's current URL.
+      (is (has new (req :get "/me" :jar alice)))
+      ;; JSON API by id.
+      (let ((json (com.inuoe.jzon:parse
+                   (req :get (format nil "/api/comments?site=blog&id=post-42&page=~a"
+                                     (quri:url-encode new))))))
+        (is (= 1 (length json))))
+      ;; Invalid ids are refused.
+      (is (has "comment id is invalid" (req :get (id-thread-path "bad%20id" new)))))))
+
+(test admin-move-and-merge-threads
+  (with-test-server ()
+    (let ((admin (admin-jar))
+          (alice (cl-cookie:make-cookie-jar))
+          (a "https://blog.example.com/a/")
+          (b "https://blog.example.com/b/"))
+      (make-blog-site admin)
+      ;; Two URL-keyed threads with one comment each.
+      (post-comment alice :page a :body "on a")
+      (req :post "/verify" :jar alice :params `(("token" . ,(last-email-token))))
+      (post-comment alice :page b :body "on b")
+      (let ((ta (getf (rf-comments::thread-by-key 1 a) :id))
+            (tb (getf (rf-comments::thread-by-key 1 b) :id)))
+        (is (has a (req :get "/admin/sites/1" :jar admin)))
+        ;; Re-key A to a stable id: an embed with data-page-id="post-7" now shows it.
+        (is (= 303 (nth-value 1 (req :post (format nil "/admin/threads/~d/move" ta) :jar admin
+                                     :params `(("key" . "post-7") ("url" . ,a))))))
+        (is (has "on a" (req :get (id-thread-path "post-7" a))))
+        ;; Moving B onto the same key merges the two threads.
+        (req :post (format nil "/admin/threads/~d/move" tb) :jar admin
+                                                            :params `(("key" . "post-7") ("url" . ,b)))
+        (let ((thread (req :get (id-thread-path "post-7" b))))
+          (is (has "2 comments" thread))
+          (is (has "on a" thread))
+          (is (has "on b" thread)))
+        (is (null (rf-comments::thread-by-id tb)))
+        ;; URLs outside the site's origins are rejected.
+        (is (= 422 (nth-value 1 (req :post (format nil "/admin/threads/~d/move" ta) :jar admin
+                                     :params '(("key" . "x") ("url" . "https://evil.example.com/"))))))))))
