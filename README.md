@@ -33,7 +33,8 @@ The design notes and the reasoning behind each decision are in
 6. [Developing in Emacs](#developing-in-emacs)
 7. [Testing](#testing)
 8. [Project layout](#project-layout)
-9. [Operations: backups, upgrades, troubleshooting](#operations)
+9. [Contributing: branching workflow](#contributing-branching-workflow)
+10. [Operations: backups, upgrades, troubleshooting](#operations)
 
 ---
 
@@ -409,6 +410,23 @@ DESIGN.md              requirements, gaps filled, architecture
 Libraries: hunchentoot and easy-routes (HTTP), sqlite (cl-sqlite), spinneret
 (HTML), com.inuoe.jzon (JSON), ironclad (SHA-256/HMAC/random), dexador (HTTPS
 client), quri, cl-ppcre, bordeaux-threads, and fiveam for tests.
+
+---
+
+## Contributing: branching workflow
+
+`master` is always deployable. For every feature or fix:
+
+1. Create a new, descriptively named branch from the latest `master`, such as
+   `feature/reply-threads`, `fix/ses-retry-on-throttle`, or `docs/backup-guide`.
+2. Work on that branch until the feature is complete and tested (`make test`,
+   plus `make docker-test` for build changes).
+3. Merge it into `master` with `git merge --no-ff`, then push `master`.
+4. Leave the merged branch in place as a record of the work. The next change
+   gets a fresh branch.
+
+The same rules, plus project conventions for AI agents, are in
+[AGENTS.md](AGENTS.md). [CLAUDE.md](CLAUDE.md) imports AGENTS.md.
 
 ---
 
