@@ -76,12 +76,17 @@
                (:li :id (format nil "c~d" (getf c :id))
                     :class (if (string= (getf c :status) "pending")
                                "rf-comment rf-pending" "rf-comment")
-                    (:div.rf-meta
-                     (:strong (getf c :display-name))
-                     (:time :datetime (getf c :created-at) (human-date (getf c :created-at)))
-                     (when (string= (getf c :status) "pending")
-                       (:span.rf-badge "awaiting email confirmation")))
-                    (comment-body-html (getf c :body)))))
+                    (let ((avatar (avatar-path (getf c :avatar-key))))
+                      (when avatar
+                        (:img.rf-avatar :src avatar :alt "" :width 40 :height 40
+                                        :loading "lazy")))
+                    (:div.rf-main
+                     (:div.rf-meta
+                      (:strong (getf c :display-name))
+                      (:time :datetime (getf c :created-at) (human-date (getf c :created-at)))
+                      (when (string= (getf c :status) "pending")
+                        (:span.rf-badge "awaiting email confirmation")))
+                     (comment-body-html (getf c :body))))))
             (:p.rf-empty "No comments yet. Start the conversation!"))
         (:form.rf-form :method "post" :action "/thread/comment"
          (:input :type "hidden" :name "site" :value (getf site :key))
@@ -113,10 +118,15 @@
           (:form :id "rf-logout" :class "rf-inline" :method "post" :action "/logout"
            (:input :type "hidden" :name "return" :value here)))
         (:p.rf-footer
-         (if user
-             ""
-             (:span (:a :href "/login" :target "_blank" "Sign in")
-                    " to see your profile and comments."))))
+         (unless user
+           (:span (:a :href "/login" :target "_blank" "Sign in")
+                  " to see your profile and comments."))
+         (when (eq *avatars* :gravatar)
+           (:span.rf-attribution
+            "Profile images are provided by "
+            (:a :href "https://gravatar.com" :target "_blank" :rel "noopener noreferrer"
+                "Gravatar")
+            "."))))
        (:script :src "/static/thread.js"))
      :status status)))
 
@@ -324,7 +334,10 @@ The thread key is the embed's data-page-id when given, else the page URL."
         (:nav (:strong "comments.ryanfleck.ca")
               (:form.rf-inline :method "post" :action "/logout"
                                (:button.rf-secondary :type "submit" "Sign out")))
-        (:h1 (format nil "Hi, ~a" (getf *user* :display-name)))
+        (:div.rf-hello
+         (let ((avatar (avatar-path (getf *user* :avatar-key))))
+           (when avatar (:img.rf-avatar :src avatar :alt "" :width 40 :height 40)))
+         (:h1 (format nil "Hi, ~a" (getf *user* :display-name))))
         (notice-html (notice-text notice))
         (:form.rf-form :method "post" :action "/me/name"
          (:div.rf-row
@@ -334,6 +347,12 @@ The thread key is the embed's data-page-id when given, else the page URL."
           (:label "Email" (:input :value (getf *user* :email) :disabled t)))
          (:div (:button :type "submit" "Save name")))
         (:p.rf-muted (format nil "Member since ~a." (human-date (getf *user* :created-at))))
+        (when (eq *avatars* :gravatar)
+          (:p.rf-muted "Your profile image comes from "
+                       (:a :href "https://gravatar.com" :target "_blank"
+                           :rel "noopener noreferrer" "Gravatar")
+                       (format nil ". To set or change it, sign in there with ~a."
+                               (getf *user* :email))))
         (:h2 (format nil "Your comments (~d)" (length comments)))
         (if (null comments)
             (:p.rf-empty "You haven't commented yet.")
@@ -382,6 +401,24 @@ The thread key is the embed's data-page-id when given, else the page URL."
 
 (easy-routes:defroute count-js ("/count.js" :method :get) ()
   (serve-js "count.js"))
+
+(easy-routes:defroute avatar ("/avatar/:key" :method :get) ()
+  (let ((user (and (eq *avatars* :gravatar)
+                   (<= 1 (length key) 64)
+                   (user-by-avatar-key key))))
+    (if (null user)
+        (progn (setf (ht:return-code*) 404
+                     (ht:content-type*) "text/plain")
+               "not found")
+        (multiple-value-bind (data content-type long-lived) (avatar-image user)
+          (setf (ht:content-type*) content-type
+                (ht:header-out "Cache-Control") (if long-lived
+                                                    "public, max-age=86400"
+                                                    "public, max-age=300")
+                (ht:header-out "X-Content-Type-Options") "nosniff"
+                ;; Images only; neuters anything active in an SVG.
+                (ht:header-out "Content-Security-Policy") "default-src 'none'; style-src 'unsafe-inline'")
+          data))))
 
 (defparameter *max-count-keys* 100)
 

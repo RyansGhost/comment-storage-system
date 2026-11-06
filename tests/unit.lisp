@@ -204,3 +204,48 @@ https://b.example.com/, https://a.example.com  not-a-url")
   (is (null (rf-comments::clean-page-id "has space")))
   (is (null (rf-comments::clean-page-id "<script>")))
   (is (null (rf-comments::clean-page-id (make-string 201 :initial-element #\a)))))
+
+;;; Avatars
+
+(test gravatar-urls
+  (let ((rf-comments::*avatar-default* "identicon")
+        (rf-comments::*avatar-size* 80))
+    ;; SHA-256 of the trimmed, lowercased address (Gravatar's current scheme).
+    (is (string= (concatenate 'string
+                              "https://gravatar.com/avatar/"
+                              "ff8d9819fc0e12bf0d24892e45987e249a28dce836a85cad60e28eaaa8c6d976"
+                              "?s=80&d=identicon&r=g")
+                 (rf-comments::gravatar-url "  Alice@Example.com ")))))
+
+(test avatar-content-types
+  (is (rf-comments::raster-image-type-p "image/png"))
+  (is (rf-comments::raster-image-type-p "image/jpeg; charset=binary"))
+  (is (not (rf-comments::raster-image-type-p "image/svg+xml")))
+  (is (not (rf-comments::raster-image-type-p "text/html")))
+  (is (not (rf-comments::raster-image-type-p nil))))
+
+(test fallback-avatar
+  (let ((svg (rf-comments::fallback-avatar-svg '(:display-name "  <b>eve" :avatar-key "abc"))))
+    (is (search ">B</text>" svg))
+    (is (not (search "<b>" svg))))
+  (is (search ">?</text>"
+              (rf-comments::fallback-avatar-svg '(:display-name "***" :avatar-key "abc")))))
+
+(test avatar-keys-backfilled-and-assigned
+  (let ((path (namestring (merge-pathnames (format nil "rf-av-~a.db" (random-token 6))
+                                           (uiop:temporary-directory)))))
+    (unwind-protect
+         (progn
+           (let ((rf-comments::*migrations* (subseq rf-comments::*migrations* 0 3)))
+             (with-temp-db (path)
+               (rf-comments:exec "INSERT INTO users (email, display_name, created_at)
+                                  VALUES ('old@example.com', 'Old', 'T')")))
+           (with-temp-db (path)
+             (let ((old (rf-comments::user-by-email "old@example.com"))
+                   (new (rf-comments::find-or-create-user "new@example.com" "New")))
+               (is (= 20 (length (getf old :avatar-key))))
+               (is (= 20 (length (getf new :avatar-key))))
+               (is (string/= (getf old :avatar-key) (getf new :avatar-key)))
+               (is (equal old (rf-comments::user-by-avatar-key (getf old :avatar-key)))))))
+      (dolist (suffix '("" "-wal" "-shm"))
+        (uiop:delete-file-if-exists (concatenate 'string path suffix))))))

@@ -12,6 +12,9 @@ Common Lisp and served from **https://comments.ryanfleck.ca**.
 - **Email-verified comments.** Commenters give a display name and email. Each
   comment stays hidden until the emailed link is clicked. Emails go through
   **Amazon SES** (API v2, signed with SigV4; no SDK needed).
+- **Gravatar profile images**, proxied through the server, so pages never
+  expose a hash of anyone's email and readers' browsers never contact
+  Gravatar.
 - **Passwordless accounts.** Users sign in with a magic link to see their
   profile and every comment they've posted, and can delete them.
 - **SQLite on the host.** Users, comment content, dates, and pages are stored
@@ -185,6 +188,8 @@ All configuration comes from environment variables (`.env`):
 | `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` | | Credentials for `ses:SendEmail` |
 | `AWS_SESSION_TOKEN` | | For temporary credentials |
 | `SES_CONFIGURATION_SET` | | Optional SES configuration set |
+| `AVATARS` | `gravatar` | `gravatar` shows profile images next to comments; `off` hides them |
+| `AVATAR_DEFAULT` | `identicon` | Image for addresses with no Gravatar: `identicon`, `mp`, `monsterid`, `wavatar`, `retro`, `robohash`, `blank` |
 | `TRUST_PROXY` | `false` | Take the client IP from the last `X-Forwarded-For` entry |
 | `COOKIE_SECURE` | on if `PUBLIC_URL` is https | Mark cookies `Secure` |
 | `SLYNK_PORT` | *(unset: no REPL)* | Port for the [live REPL](#live-repl-in-production) |
@@ -239,6 +244,18 @@ Tunables (limits, token lifetimes) are special variables at the top of
 4. Anyone can sign in at `/login` with a magic link. `/me` shows their
    profile (display name editable) and all their comments, each with its
    status and a delete button.
+
+**Profile images.** Each comment shows its author's
+[Gravatar](https://gravatar.com), or a generated identicon if they don't
+have one. A note at the bottom of every comment section says where the
+images come from, and the profile page tells users how to change theirs.
+
+Gravatar looks people up by the SHA-256 of their email. Linking to it
+directly would put that hash in every page, where it can be reversed by
+guessing addresses. So pages use `/avatar/<random key>`, and the server
+fetches from Gravatar itself. It caches each image for 24 hours and only
+accepts PNG/JPEG/GIF/WebP. If Gravatar can't be reached, it draws the
+person's initial instead. Set `AVATARS=off` to disable all of this.
 
 Spam defences: a hidden honeypot field, a per-IP posting rate limit, a
 per-address email limit (5/hour), a 5000-character limit, and moderation.
@@ -439,6 +456,7 @@ src/
   util.lisp            time, crypto, URL canonicalisation, validation, rate limiter
   db.lisp              SQLite connection, migrations, data model queries
   events.lisp          publish/hide/remove as generic functions; :after observers
+  avatars.lisp         Gravatar proxy + cache, SVG-initial fallback
   email.lisp           SES v2 SendEmail + SigV4 signer + email templates
   views.lisp           Spinneret layout, CSS, per-site themes
   routes.lisp          request helpers, decorators, defpage/defaction/with-valid-inputs
