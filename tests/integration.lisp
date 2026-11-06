@@ -368,7 +368,32 @@ Returns (values body status headers-hash-table)."
         (is (= 403 (nth-value 1 (req :post path :origin nil)))
             "~a accepted a POST without Origin" path)
         (is (= 403 (nth-value 1 (req :post path :origin "https://evil.example.com")))
-            "~a accepted a cross-site POST" path)))))
+            "~a accepted a cross-site POST" path)
+        ;; Fetch Metadata wins even when Origin looks right.
+        (dolist (site '("cross-site" "same-site"))
+          (is (= 403 (nth-value 1 (req :post path :headers `(("Sec-Fetch-Site" . ,site)))))
+              "~a accepted a POST with Sec-Fetch-Site: ~a" path site))))))
+
+(test fetch-metadata-and-null-origin
+  ;; OWASP CSRF cheat sheet: Sec-Fetch-Site is the primary signal for modern
+  ;; browsers, Origin/Referer the mandatory fallback, and "Origin: null" is
+  ;; never evidence of a same-origin request.
+  (with-test-server ()
+    (let ((params '(("email" . "nobody@example.com")))
+          (our-page (format nil "~a/login" *base*)))
+      ;; What a modern browser sends for our own form.
+      (is (= 200 (nth-value 1 (req :post "/login" :params params
+                                                  :headers '(("Sec-Fetch-Site" . "same-origin"))))))
+      (is (= 403 (nth-value 1 (req :post "/login" :params params
+                                                  :headers '(("Sec-Fetch-Site" . "none"))))))
+      ;; A present Origin must match: null fails even with our own Referer.
+      (is (= 403 (nth-value 1 (req :post "/login" :params params :origin "null"
+                                                  :headers `(("Referer" . ,our-page))))))
+      ;; Legacy fallback: no Fetch Metadata, no Origin, our own Referer.
+      (is (= 200 (nth-value 1 (req :post "/login" :params params :origin nil
+                                                  :headers `(("Referer" . ,our-page))))))
+      ;; Nothing to go on at all.
+      (is (= 403 (nth-value 1 (req :post "/login" :params params :origin nil)))))))
 
 ;;; ------------------------------------------------------------------
 ;;; Observers (src/events.lisp)
