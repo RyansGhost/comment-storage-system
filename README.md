@@ -1,5 +1,7 @@
 # rf-comments
 
+[![Tests](https://github.com/RyansGhost/comment-storage-system/actions/workflows/test.yml/badge.svg?branch=master)](https://github.com/RyansGhost/comment-storage-system/actions/workflows/test.yml)
+
 A tiny, self-hosted comment service for the `*.ryanfleck.ca` sites, written in
 Common Lisp and served from **https://comments.ryanfleck.ca**.
 
@@ -368,6 +370,12 @@ make test          # FiveAM suite on your local SBCL
 make docker-test   # the same suite inside the Docker build image
 ```
 
+**CI:** [`.github/workflows/test.yml`](.github/workflows/test.yml) runs on
+every push to any branch and on pull requests. It runs the suite in the
+Dockerfile's `test` stage, builds the runtime image, and smoke-tests the
+container: `/healthz`, `embed.js`, the admin login page, a database file on
+the host, Docker's healthcheck, and a clean shutdown.
+
 The suite has 177 checks:
 
 - **unit:** URL canonicalisation, origins, validation, escaping, rate limiting,
@@ -420,7 +428,8 @@ client), quri, cl-ppcre, bordeaux-threads, and fiveam for tests.
 1. Create a new, descriptively named branch from the latest `master`, such as
    `feature/reply-threads`, `fix/ses-retry-on-throttle`, or `docs/backup-guide`.
 2. Work on that branch until the feature is complete and tested (`make test`,
-   plus `make docker-test` for build changes).
+   plus `make docker-test` for build changes). Push it so GitHub Actions
+   runs, and wait for a green run.
 3. Merge it into `master` with `git merge --no-ff`, then push `master`.
 4. Leave the merged branch in place as a record of the work. The next change
    gets a fresh branch.

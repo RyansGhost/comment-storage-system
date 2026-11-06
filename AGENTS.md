@@ -17,7 +17,10 @@ README has the full developer guide; the design rationale is in DESIGN.md.
 
 2. **Work on that branch until the feature is complete and tested.** Commit
    as often as useful and push the branch. `make test` must pass. For changes
-   touching the Docker build, `make docker-test` must pass too.
+   touching the Docker build, `make docker-test` must pass too. Pushing the
+   branch triggers the GitHub Actions `Tests` workflow
+   (`.github/workflows/test.yml`), and that run must be green before you
+   merge.
 3. **Merge into `master` when done**, using a merge commit so the feature
    shows up as one unit in the history, and push:
 
